@@ -252,6 +252,50 @@ export const CUSTOMIZATION_SURFACES = [
   'mcp',
 ] as const
 
+const FoundryModelProfileSchema = z.object({
+  id: z
+    .string()
+    .min(1)
+    .describe('Unique ID for this Foundry model profile'),
+  name: z
+    .string()
+    .min(1)
+    .describe('Display name for this Foundry model profile'),
+  baseUrl: z
+    .string()
+    .min(1)
+    .describe('Foundry base URL (for example: https://my-resource.services.ai.azure.com)'),
+  apiKey: z
+    .string()
+    .min(1)
+    .describe('Foundry API key for this profile'),
+  apiVersion: z
+    .string()
+    .min(1)
+    .optional()
+    .describe('Optional Foundry API version'),
+  modelId: z
+    .string()
+    .min(1)
+    .describe('Provider model/deployment ID to send in requests'),
+  modelName: z
+    .string()
+    .min(1)
+    .describe('Display name shown in model picker/status for this model'),
+})
+
+const FoundryProfilesSchema = z.object({
+  activeProfileId: z
+    .string()
+    .min(1)
+    .optional()
+    .describe('ID of the active Foundry profile'),
+  profiles: z
+    .array(FoundryModelProfileSchema)
+    .optional()
+    .describe('Saved Foundry model profiles'),
+})
+
 export const SettingsSchema = lazySchema(() =>
   z
     .object({
@@ -333,6 +377,9 @@ export const SettingsSchema = lazySchema(() =>
       env: EnvironmentVariablesSchema()
         .optional()
         .describe('Environment variables to set for Claude Code sessions'),
+      foundry: FoundryProfilesSchema.optional().describe(
+        'Saved Microsoft Foundry model profiles for interactive configuration',
+      ),
       // Attribution for commits and PRs
       attribution: z
         .object({
