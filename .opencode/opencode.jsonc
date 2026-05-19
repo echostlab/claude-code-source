@@ -4,8 +4,9 @@
     "azure-foundry": {
       "npm": "@ai-sdk/openai",
       "options": {
-        "apiKey": "{env:AZURE_OPENAI_API_KEY}",
-        "baseURL": "https://openslab-resource.openai.azure.com/openai/v1"
+        "apiKey": "{env:OPENCODE_API_KEY}",
+        "baseURL": "{env:OPENCODE_BASE_URL}",
+        "apiVersion": "{env:OPENCODE_API_VERSION}"
       },
       "models": {
         "gpt-5.3-codex": {
