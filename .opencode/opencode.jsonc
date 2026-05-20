@@ -250,7 +250,7 @@
    ],
    "watcher":{
       "ignore":[
-         ".opencode/node_modules/**"
+         ".opencode/**"
       ]
    }
 }
