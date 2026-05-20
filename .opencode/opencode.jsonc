@@ -250,7 +250,8 @@
    ],
    "watcher":{
       "ignore":[
-         ".opencode/**"
+         ".opencode/**",
+         ".github/workflows/opencode.yml"
       ]
    }
 }
