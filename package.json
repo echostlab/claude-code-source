@@ -26,10 +26,11 @@
   },
   "preferGlobal": true,
   "bin": {
-    "claude-code-source": "./bin/claude-code-source"
+    "claude-code-source": "bin/claude-code-source"
   },
   "files": [
     "dist/",
+    "src/",
     "bin/",
     "scripts/",
     "docs/guia-empaquetado-npm.md",
@@ -43,7 +44,7 @@
   "scripts": {
     "check:bun": "node ./scripts/require-bun.cjs",
     "prebuild": "npm run check:bun",
-    "build": "bun build ./src/entrypoints/cli.tsx --outfile ./dist/cli.js --target bun --format esm",
+    "build": "node ./scripts/build-cli.cjs",
     "prepack": "npm run build",
     "pack:dry": "npm pack --dry-run"
   },

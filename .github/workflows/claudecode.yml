@@ -138,7 +138,7 @@ jobs:
             COMMAND="${FIRST_TOKEN#/}"
             COMMAND="${COMMAND,,}"
 
-            if [[ "$COMMAND" == "oc" || "$COMMAND" == "opencode" || "$COMMAND" == "claude" ]]; then
+            if [[ "$COMMAND" == "claude" ]]; then
               if ! is_trusted_actor "$COMMENT_AUTHOR_ASSOCIATION" "$COMMENT_AUTHOR_LOGIN"; then
                 echo "::notice title=ClaudeCode::Ignoring slash command from untrusted actor '$COMMENT_AUTHOR_LOGIN' ($COMMENT_AUTHOR_ASSOCIATION)"
               else
