@@ -1,0 +1,1117 @@
+name: claudecode
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+  issues:
+    types: [opened, edited, reopened]
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: Prompt to run in CI
+        required: false
+        type: string
+      provider:
+        description: Provider alias (e.g. azure-foundry)
+        required: false
+        type: string
+      model_id:
+        description: Azure deployment/model id (e.g. gpt-4.1, deepseek-r1)
+        required: false
+        type: string
+      base_url:
+        description: Provider base URL (must be https)
+        required: false
+        type: string
+      api_version:
+        description: API version override (optional)
+        required: false
+        type: string
+
+concurrency:
+  group: claudecode-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  detect-trigger:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.detect.outputs.should_run }}
+      run_kind: ${{ steps.detect.outputs.run_kind }}
+      prompt: ${{ steps.detect.outputs.prompt }}
+      pr_number: ${{ steps.detect.outputs.pr_number }}
+      issue_number: ${{ steps.detect.outputs.issue_number }}
+      has_pr_context: ${{ steps.detect.outputs.has_pr_context }}
+      provider: ${{ steps.detect.outputs.provider }}
+    steps:
+      - id: detect
+        name: Detect event and build prompt
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || '' }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || '' }}
+          IS_PR_COMMENT: ${{ github.event.issue.pull_request != null }}
+          ISSUE_TITLE: ${{ github.event.issue.title || '' }}
+          ISSUE_BODY: ${{ github.event.issue.body || '' }}
+          ISSUE_AUTHOR_ASSOCIATION: ${{ github.event.issue.author_association || '' }}
+          ISSUE_AUTHOR_LOGIN: ${{ github.event.issue.user.login || '' }}
+          PR_TITLE: ${{ github.event.pull_request.title || '' }}
+          PR_BODY: ${{ github.event.pull_request.body || '' }}
+          PR_AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association || '' }}
+          PR_AUTHOR_LOGIN: ${{ github.event.pull_request.user.login || '' }}
+          COMMENT_BODY: ${{ github.event.comment.body || '' }}
+          COMMENT_AUTHOR_ASSOCIATION: ${{ github.event.comment.author_association || '' }}
+          COMMENT_AUTHOR_LOGIN: ${{ github.event.comment.user.login || '' }}
+          ALLOWED_ASSOCIATIONS: OWNER,MEMBER,COLLABORATOR
+          ALLOWED_SLASH_ACTORS: ${{ vars.CLAUDECODE_ALLOWED_SLASH_ACTORS || vars.OPENCODE_ALLOWED_SLASH_ACTORS || '' }}
+          WORKFLOW_PROMPT: ${{ inputs.prompt || '' }}
+          DISPATCH_PROVIDER: ${{ github.event.inputs.provider || '' }}
+          DEFAULT_PROVIDER: ${{ vars.CLAUDECODE_PROVIDER || vars.OPENCODE_PROVIDER || vars.PROVIDER || vars.provider || 'azure-foundry' }}
+        run: |
+          set -euo pipefail
+
+          SHOULD_RUN="false"
+          RUN_KIND="none"
+          PROMPT=""
+          HAS_PR_CONTEXT="false"
+          RAW_PROVIDER=""
+          RESOLVED_PROVIDER=""
+
+          trim() {
+            local v="$1"
+            v="${v#"${v%%[![:space:]]*}"}"
+            v="${v%"${v##*[![:space:]]}"}"
+            printf '%s' "$v"
+          }
+
+          csv_contains() {
+            local csv_list="$1"
+            local probe="$2"
+            local normalized_probe="${probe//[[:space:]]/}"
+            local candidate=""
+
+            normalized_probe="${normalized_probe,,}"
+            IFS=',' read -r -a _items <<< "$csv_list"
+            for candidate in "${_items[@]}"; do
+              candidate="${candidate//[[:space:]]/}"
+              candidate="${candidate,,}"
+              if [[ "$candidate" == "$normalized_probe" ]]; then
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          is_trusted_actor() {
+            local association="${1^^}"
+            local login="${2,,}"
+
+            if csv_contains "$ALLOWED_ASSOCIATIONS" "$association"; then
+              return 0
+            fi
+            if [[ -n "$login" ]] && csv_contains "$ALLOWED_SLASH_ACTORS" "$login"; then
+              return 0
+            fi
+            return 1
+          }
+
+          normalize_provider() {
+            local input="${1:-}"
+            local normalized="${input,,}"
+
+            case "$normalized" in
+              azure|azure-foundry|azure-openai|foundry)
+                echo "azure-foundry"
+                ;;
+              *)
+                echo "::error title=ClaudeCode::Unsupported provider '$input'. Allowed values: azure, azure-foundry, azure-openai, foundry" >&2
+                exit 1
+                ;;
+            esac
+          }
+
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            HAS_PR_CONTEXT="true"
+            if is_trusted_actor "$PR_AUTHOR_ASSOCIATION" "$PR_AUTHOR_LOGIN"; then
+              SHOULD_RUN="true"
+              RUN_KIND="auto_pr_review"
+              BODY_TRIMMED="$(trim "${PR_BODY:-}")"
+              if [[ -n "$BODY_TRIMMED" ]]; then
+                PROMPT="Review this pull request in detail. Focus on correctness, regressions, security, and test gaps.\n\nPR title: ${PR_TITLE}\n\nPR description:\n${PR_BODY}"
+              else
+                PROMPT="Review this pull request in detail. Focus on correctness, regressions, security, and test gaps. PR title: ${PR_TITLE}."
+              fi
+            else
+              echo "::notice title=ClaudeCode::Ignoring untrusted PR author '$PR_AUTHOR_LOGIN' ($PR_AUTHOR_ASSOCIATION)"
+            fi
+          elif [[ "$EVENT_NAME" == "issues" ]]; then
+            if is_trusted_actor "$ISSUE_AUTHOR_ASSOCIATION" "$ISSUE_AUTHOR_LOGIN"; then
+              SHOULD_RUN="true"
+              RUN_KIND="issue_task"
+              BODY_TRIMMED="$(trim "${ISSUE_BODY:-}")"
+              if [[ -n "$BODY_TRIMMED" ]]; then
+                PROMPT="$ISSUE_BODY"
+              else
+                PROMPT="$ISSUE_TITLE"
+              fi
+            else
+              echo "::notice title=ClaudeCode::Ignoring untrusted issue author '$ISSUE_AUTHOR_LOGIN' ($ISSUE_AUTHOR_ASSOCIATION)"
+            fi
+          elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            SHOULD_RUN="true"
+            RUN_KIND="manual_workflow"
+            PROMPT="$WORKFLOW_PROMPT"
+          elif [[ "$EVENT_NAME" == "issue_comment" || "$EVENT_NAME" == "pull_request_review_comment" ]]; then
+            if [[ "$EVENT_NAME" == "pull_request_review_comment" || "$IS_PR_COMMENT" == "true" ]]; then
+              HAS_PR_CONTEXT="true"
+            fi
+            FIRST_TOKEN="$(printf '%s' "$COMMENT_BODY" | sed -nE 's/^[[:space:]]*(\/[A-Za-z0-9_-]+).*$/\1/p' | head -n 1)"
+            COMMAND="${FIRST_TOKEN#/}"
+            COMMAND="${COMMAND,,}"
+
+            if [[ "$COMMAND" == "claude" ]]; then
+              if ! is_trusted_actor "$COMMENT_AUTHOR_ASSOCIATION" "$COMMENT_AUTHOR_LOGIN"; then
+                echo "::notice title=ClaudeCode::Ignoring slash command from untrusted actor '$COMMENT_AUTHOR_LOGIN' ($COMMENT_AUTHOR_ASSOCIATION)"
+              else
+                SHOULD_RUN="true"
+                if [[ "$EVENT_NAME" == "pull_request_review_comment" || "$IS_PR_COMMENT" == "true" ]]; then
+                  RUN_KIND="manual_pr_review"
+                else
+                  RUN_KIND="issue_task"
+                fi
+
+                PROMPT="$(printf '%s' "$COMMENT_BODY" | sed -E '1s/^[[:space:]]*\/[A-Za-z0-9_-]+[[:space:]]*//')"
+                PROMPT="$(trim "$PROMPT")"
+              fi
+            fi
+          fi
+
+          if [[ "$SHOULD_RUN" == "true" ]]; then
+            RAW_PROVIDER="$(trim "${DISPATCH_PROVIDER:-}")"
+            if [[ -z "$RAW_PROVIDER" ]]; then
+              RAW_PROVIDER="$(trim "${DEFAULT_PROVIDER:-azure-foundry}")"
+            fi
+            RESOLVED_PROVIDER="$(normalize_provider "$RAW_PROVIDER")"
+          else
+            RESOLVED_PROVIDER="azure-foundry"
+            RAW_PROVIDER="$(trim "${DISPATCH_PROVIDER:-}")"
+            if [[ -n "$RAW_PROVIDER" ]]; then
+              echo "::notice title=ClaudeCode::Skipping provider validation because should_run=false for event '$EVENT_NAME'"
+            fi
+          fi
+
+          echo "::notice title=ClaudeCode::Event '$EVENT_NAME' -> should_run=$SHOULD_RUN, run_kind=$RUN_KIND, provider='$RESOLVED_PROVIDER' (Azure Foundry mode)"
+
+          OUTPUT_DELIM="CLAUDECODE_$(date +%s)_$RANDOM_$RANDOM"
+          {
+            echo "should_run=$SHOULD_RUN"
+            echo "run_kind=$RUN_KIND"
+            echo "pr_number=$PR_NUMBER"
+            echo "issue_number=$ISSUE_NUMBER"
+            echo "has_pr_context=$HAS_PR_CONTEXT"
+            echo "provider=$RESOLVED_PROVIDER"
+            echo "prompt<<$OUTPUT_DELIM"
+            echo "$PROMPT"
+            echo "$OUTPUT_DELIM"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Claude Code trigger"
+            echo "- event: \`$EVENT_NAME\`"
+            echo "- should_run: \`$SHOULD_RUN\`"
+            echo "- run_kind: \`$RUN_KIND\`"
+            echo "- mode: \`$([[ "$RUN_KIND" == "issue_task" ]] && echo implementation || echo review)\`"
+            echo "- provider: \`$RESOLVED_PROVIDER\`"
+            echo "- runtime: \`azure-foundry\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  claudecode-implement:
+    needs: detect-trigger
+    if: needs.detect-trigger.outputs.should_run == 'true' && needs.detect-trigger.outputs.run_kind == 'issue_task' && needs.detect-trigger.outputs.has_pr_context != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    env:
+      DISPATCH_PROVIDER: ${{ github.event.inputs.provider || '' }}
+      DISPATCH_MODEL_ID: ${{ github.event.inputs.model_id || '' }}
+      DISPATCH_BASE_URL: ${{ github.event.inputs.base_url || '' }}
+      DISPATCH_API_VERSION: ${{ github.event.inputs.api_version || '' }}
+      DETECTED_PROVIDER: ${{ needs.detect-trigger.outputs.provider }}
+      CLAUDECODE_ALLOW_NON_AZURE_BASE_URL: ${{ vars.CLAUDECODE_ALLOW_NON_AZURE_BASE_URL || '' }}
+
+      provider: ${{ vars.CLAUDECODE_PROVIDER || vars.OPENCODE_PROVIDER || vars.PROVIDER || vars.provider || 'azure-foundry' }}
+      PROVIDER: ${{ vars.CLAUDECODE_PROVIDER || vars.OPENCODE_PROVIDER || vars.PROVIDER || vars.provider || 'azure-foundry' }}
+      CLAUDECODE_PROVIDER: ${{ vars.CLAUDECODE_PROVIDER || vars.OPENCODE_PROVIDER || vars.PROVIDER || vars.provider || 'azure-foundry' }}
+
+      baseurl: ${{ vars.CLAUDECODE_BASE_URL || vars.OPENCODE_BASE_URL || vars.AZURE_OPENAI_ENDPOINT || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}
+      BASEURL: ${{ vars.CLAUDECODE_BASE_URL || vars.OPENCODE_BASE_URL || vars.AZURE_OPENAI_ENDPOINT || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}
+      CLAUDECODE_BASE_URL: ${{ vars.CLAUDECODE_BASE_URL || vars.OPENCODE_BASE_URL || vars.AZURE_OPENAI_ENDPOINT || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}
+      AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT || '' }}
+
+      modelid: ${{ vars.CLAUDECODE_MODEL_ID || vars.OPENCODE_MODEL_ID || vars.AZURE_OPENAI_DEPLOYMENT || vars.MODEL_ID || vars.modelid || vars.model || 'gpt-5.3-codex' }}
+      MODEL_ID: ${{ vars.CLAUDECODE_MODEL_ID || vars.OPENCODE_MODEL_ID || vars.AZURE_OPENAI_DEPLOYMENT || vars.MODEL_ID || vars.modelid || vars.model || 'gpt-5.3-codex' }}
+      model: ${{ vars.CLAUDECODE_MODEL_ID || vars.OPENCODE_MODEL_ID || vars.AZURE_OPENAI_DEPLOYMENT || vars.MODEL_ID || vars.modelid || vars.model || 'gpt-5.3-codex' }}
+      AZURE_OPENAI_DEPLOYMENT: ${{ vars.AZURE_OPENAI_DEPLOYMENT || '' }}
+
+      apiVersion: ${{ vars.CLAUDECODE_API_VERSION || vars.OPENCODE_API_VERSION || vars.AZURE_OPENAI_API_VERSION || vars.API_VERSION || vars.APIVERSION || vars.apiVersion || '' }}
+      API_VERSION: ${{ vars.CLAUDECODE_API_VERSION || vars.OPENCODE_API_VERSION || vars.AZURE_OPENAI_API_VERSION || vars.API_VERSION || vars.APIVERSION || vars.apiVersion || '' }}
+      AZURE_OPENAI_API_VERSION: ${{ vars.AZURE_OPENAI_API_VERSION || '' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Resolve branch and PR automation context
+        id: gitctx
+        shell: bash
+        env:
+          RUN_KIND: ${{ needs.detect-trigger.outputs.run_kind }}
+          HAS_PR_CONTEXT: ${{ needs.detect-trigger.outputs.has_pr_context }}
+          ISSUE_NUMBER: ${{ needs.detect-trigger.outputs.issue_number }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+
+          SHOULD_AUTOMATE_PR="false"
+          if [[ "$RUN_KIND" == "issue_task" && "$HAS_PR_CONTEXT" != "true" ]]; then
+            SHOULD_AUTOMATE_PR="true"
+          fi
+
+          SAFE_ISSUE="${ISSUE_NUMBER:-manual}"
+          BRANCH_NAME="claudecode/issue-${SAFE_ISSUE}-${GITHUB_RUN_ID}-a${RUN_ATTEMPT}"
+
+          {
+            echo "should_automate_pr=$SHOULD_AUTOMATE_PR"
+            echo "base_branch=$DEFAULT_BRANCH"
+            echo "branch_name=$BRANCH_NAME"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "::notice title=ClaudeCode::Context resolved (run_kind=$RUN_KIND, has_pr_context=$HAS_PR_CONTEXT, should_automate_pr=$SHOULD_AUTOMATE_PR, branch=$BRANCH_NAME)"
+          {
+            echo "## Claude Code git context"
+            echo "- should_automate_pr: \`$SHOULD_AUTOMATE_PR\`"
+            echo "- base_branch: \`$DEFAULT_BRANCH\`"
+            echo "- target_branch: \`$BRANCH_NAME\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create working branch for implementation
+        if: steps.gitctx.outputs.should_automate_pr == 'true'
+        shell: bash
+        env:
+          BRANCH_NAME: ${{ steps.gitctx.outputs.branch_name }}
+        run: |
+          set -euo pipefail
+          git checkout -B "$BRANCH_NAME"
+          echo "::notice title=ClaudeCode::Created implementation branch '$BRANCH_NAME'"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Build project
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::group::Build"
+          npm run build
+          echo "::notice title=ClaudeCode::Build completed"
+          echo "::endgroup::"
+
+      - name: Configure Foundry runtime env
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          first_non_empty() {
+            local value=""
+            for value in "$@"; do
+              if [[ -n "${value:-}" ]]; then
+                printf '%s' "$value"
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          trim() {
+            local value="${1:-}"
+            value="${value#"${value%%[![:space:]]*}"}"
+            value="${value%"${value##*[![:space:]]}"}"
+            printf '%s' "$value"
+          }
+
+          normalize_provider() {
+            local input="${1:-}"
+            local normalized="${input,,}"
+
+            case "$normalized" in
+              azure|azure-foundry|azure-openai|foundry)
+                echo "azure-foundry"
+                ;;
+              *)
+                echo "::error title=ClaudeCode::Unsupported provider '$input'. Allowed values: azure, azure-foundry, azure-openai, foundry" >&2
+                exit 1
+                ;;
+            esac
+          }
+
+          is_truthy() {
+            local value="${1:-}"
+            case "${value,,}" in
+              1|true|yes|y|on) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          is_allowed_azure_host() {
+            local host="${1,,}"
+            case "$host" in
+              openai.azure.com|*.openai.azure.com|services.ai.azure.com|*.services.ai.azure.com)
+                return 0
+                ;;
+              *)
+                return 1
+                ;;
+            esac
+          }
+
+          RAW_PROVIDER="$(first_non_empty "${DETECTED_PROVIDER:-}" "${DISPATCH_PROVIDER:-}" "${CLAUDECODE_PROVIDER:-}" "${PROVIDER:-}" "${provider:-}" "azure-foundry")"
+          RAW_PROVIDER="$(trim "$RAW_PROVIDER")"
+          RESOLVED_PROVIDER="$(normalize_provider "$RAW_PROVIDER")"
+
+          RESOLVED_BASEURL="$(first_non_empty "${DISPATCH_BASE_URL:-}" "${CLAUDECODE_BASE_URL:-}" "${AZURE_OPENAI_ENDPOINT:-}" "${BASEURL:-}" "${baseurl:-}" "https://openslab-resource.openai.azure.com/openai/v1")"
+          RESOLVED_BASEURL="$(trim "$RESOLVED_BASEURL")"
+
+          RAW_MODELID="$(first_non_empty "${DISPATCH_MODEL_ID:-}" "${CLAUDECODE_MODEL_ID:-}" "${AZURE_OPENAI_DEPLOYMENT:-}" "${MODEL_ID:-}" "${modelid:-}" "${model:-}" "gpt-5.3-codex")"
+          RAW_MODELID="$(trim "$RAW_MODELID")"
+
+          RESOLVED_APIVERSION="$(first_non_empty "${DISPATCH_API_VERSION:-}" "${CLAUDECODE_API_VERSION:-}" "${AZURE_OPENAI_API_VERSION:-}" "${API_VERSION:-}" "${apiVersion:-}" "")"
+          RESOLVED_APIVERSION="$(trim "$RESOLVED_APIVERSION")"
+
+          ALLOW_NON_AZURE_BASE_URL_RAW="$(trim "${CLAUDECODE_ALLOW_NON_AZURE_BASE_URL:-}")"
+
+          if [[ -z "${RAW_MODELID//[[:space:]]/}" ]]; then
+            echo "::error title=ClaudeCode::model_id cannot be empty after resolution"
+            exit 1
+          fi
+
+          if ! RESOLVED_BASEURL_HOST="$(node -e 'const value = process.argv[1]; if (!value || !value.trim()) { console.error("base_url is empty"); process.exit(1); } let parsed; try { parsed = new URL(value); } catch { console.error("base_url is not a valid URL"); process.exit(1); } if (parsed.protocol !== "https:") { console.error(`base_url must use https (received ${parsed.protocol || "unknown"})`); process.exit(1); } process.stdout.write(parsed.hostname.toLowerCase());' "$RESOLVED_BASEURL")"
+          then
+            echo "::error title=ClaudeCode::Invalid base_url '$RESOLVED_BASEURL'"
+            exit 1
+          fi
+
+          BASE_URL_TRUST_MODE="azure-allowlist"
+          if is_allowed_azure_host "$RESOLVED_BASEURL_HOST"; then
+            BASE_URL_TRUSTED="true"
+          elif is_truthy "$ALLOW_NON_AZURE_BASE_URL_RAW"; then
+            BASE_URL_TRUSTED="true"
+            BASE_URL_TRUST_MODE="override-non-azure"
+            echo "::warning title=ClaudeCode::Using non-Azure base_url host '$RESOLVED_BASEURL_HOST' because CLAUDECODE_ALLOW_NON_AZURE_BASE_URL=true. API key will be sent to this host."
+          else
+            echo "::error title=ClaudeCode::base_url host '$RESOLVED_BASEURL_HOST' is not allowed. Allowed hosts: *.openai.azure.com, *.services.ai.azure.com. Set CLAUDECODE_ALLOW_NON_AZURE_BASE_URL=true only for trusted non-Azure endpoints."
+            exit 1
+          fi
+
+          RESOLVED_MODELID="$RAW_MODELID"
+          if [[ "${RESOLVED_MODELID,,}" == azure-foundry/* ]]; then
+            RESOLVED_MODELID="${RESOLVED_MODELID#*/}"
+            echo "::notice title=ClaudeCode::Normalized model_id '$RAW_MODELID' -> '$RESOLVED_MODELID'"
+          fi
+
+          if [[ -z "${RESOLVED_MODELID//[[:space:]]/}" ]]; then
+            echo "::error title=ClaudeCode::model_id resolved to empty after normalization"
+            exit 1
+          fi
+
+          {
+            echo "CLAUDECODE_FOUNDRY_PROVIDER=$RESOLVED_PROVIDER"
+            echo "CLAUDECODE_FOUNDRY_PROVIDER_INPUT=$RAW_PROVIDER"
+            echo "CLAUDECODE_FOUNDRY_BASE_URL=$RESOLVED_BASEURL"
+            echo "CLAUDECODE_FOUNDRY_BASE_URL_HOST=$RESOLVED_BASEURL_HOST"
+            echo "CLAUDECODE_FOUNDRY_BASE_URL_TRUSTED=$BASE_URL_TRUSTED"
+            echo "CLAUDECODE_FOUNDRY_BASE_URL_TRUST_MODE=$BASE_URL_TRUST_MODE"
+            echo "CLAUDECODE_FOUNDRY_MODEL_ID_RAW=$RAW_MODELID"
+            echo "CLAUDECODE_FOUNDRY_MODEL_ID=$RESOLVED_MODELID"
+            echo "CLAUDECODE_FOUNDRY_API_VERSION=$RESOLVED_APIVERSION"
+          } >> "$GITHUB_ENV"
+
+          echo "::notice title=ClaudeCode::Azure Foundry mode active (provider='$RESOLVED_PROVIDER', model='$RESOLVED_MODELID', base_url_host='$RESOLVED_BASEURL_HOST', trust_mode='$BASE_URL_TRUST_MODE', api_version='${RESOLVED_APIVERSION:-default}')"
+
+          {
+            echo "## Claude Code runtime config"
+            echo "- provider input: \`$RAW_PROVIDER\`"
+            echo "- provider normalized: \`$RESOLVED_PROVIDER\`"
+            echo "- runtime: \`azure-foundry\`"
+            echo "- model_id (resolved): \`$RAW_MODELID\`"
+            echo "- model_id (ANTHROPIC_MODEL): \`$RESOLVED_MODELID\`"
+            echo "- base_url: \`$RESOLVED_BASEURL\`"
+            echo "- base_url host: \`$RESOLVED_BASEURL_HOST\`"
+            echo "- base_url trust mode: \`$BASE_URL_TRUST_MODE\`"
+            echo "- api_version: \`${RESOLVED_APIVERSION:-default}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build effective prompt
+        id: prompt
+        shell: bash
+        env:
+          INPUT_PROMPT: ${{ needs.detect-trigger.outputs.prompt }}
+          RUN_KIND: ${{ needs.detect-trigger.outputs.run_kind }}
+          SHOULD_AUTOMATE_PR: ${{ steps.gitctx.outputs.should_automate_pr }}
+          TARGET_BRANCH: ${{ steps.gitctx.outputs.branch_name }}
+          BASE_BRANCH: ${{ steps.gitctx.outputs.base_branch }}
+          ISSUE_NUMBER: ${{ needs.detect-trigger.outputs.issue_number }}
+        run: |
+          set -euo pipefail
+
+          EFFECTIVE_PROMPT="$INPUT_PROMPT"
+          if [[ -z "${EFFECTIVE_PROMPT//[[:space:]]/}" ]]; then
+            EFFECTIVE_PROMPT="Please analyze the current repository state and provide actionable recommendations."
+          fi
+
+          if [[ "$RUN_KIND" == "issue_task" && "$SHOULD_AUTOMATE_PR" == "true" ]]; then
+            CONTEXT_SUFFIX="$(printf '\n\nWorkflow context:\n- You are implementing issue #%s in CI.\n- Work on branch '\''%s'\'' (base '\''%s'\'').\n- Make concrete repository changes that satisfy the issue.\n- If possible, commit and open/update a PR to '\''%s'\''.\n- If you cannot open the PR directly, leave changes committed in the current branch for workflow fallback automation.' "$ISSUE_NUMBER" "$TARGET_BRANCH" "$BASE_BRANCH" "$BASE_BRANCH")"
+            EFFECTIVE_PROMPT="${EFFECTIVE_PROMPT}${CONTEXT_SUFFIX}"
+          fi
+
+          DELIM="CLAUDECODE_PROMPT_$(date +%s)_$RANDOM"
+          {
+            echo "effective_prompt<<$DELIM"
+            echo "$EFFECTIVE_PROMPT"
+            echo "$DELIM"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "::notice title=ClaudeCode::Effective prompt prepared (run_kind=$RUN_KIND, auto_pr=$SHOULD_AUTOMATE_PR)"
+
+      - name: Run Claude Code
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          apiKey: ${{ secrets.CLAUDECODE_API_KEY || secrets.OPENCODE_API_KEY || secrets.AZURE_OPENAI_API_KEY || secrets.AZURE_API_KEY || secrets.API_KEY || secrets.apiKey || '' }}
+          API_KEY: ${{ secrets.CLAUDECODE_API_KEY || secrets.OPENCODE_API_KEY || secrets.AZURE_OPENAI_API_KEY || secrets.AZURE_API_KEY || secrets.API_KEY || secrets.apiKey || '' }}
+          AZURE_API_KEY: ${{ secrets.CLAUDECODE_API_KEY || secrets.OPENCODE_API_KEY || secrets.AZURE_OPENAI_API_KEY || secrets.AZURE_API_KEY || secrets.API_KEY || secrets.apiKey || '' }}
+          RUN_KIND: ${{ needs.detect-trigger.outputs.run_kind }}
+          CLAUDE_PROMPT: ${{ steps.prompt.outputs.effective_prompt }}
+        run: |
+          set -euo pipefail
+          echo "::group::Claude Code"
+
+          if [[ -z "${API_KEY:-}" && -z "${apiKey:-}" ]]; then
+            echo "::error title=ClaudeCode::Missing Foundry API key (apiKey/API_KEY secret)"
+            exit 1
+          fi
+
+          trim() {
+            local value="${1:-}"
+            value="${value#"${value%%[![:space:]]*}"}"
+            value="${value%"${value##*[![:space:]]}"}"
+            printf '%s' "$value"
+          }
+
+          normalize_provider() {
+            local input="${1:-}"
+            local normalized="${input,,}"
+
+            case "$normalized" in
+              azure|azure-foundry|azure-openai|foundry)
+                echo "azure-foundry"
+                ;;
+              *)
+                echo "::error title=ClaudeCode::Unsupported provider '$input'. Allowed values: azure, azure-foundry, azure-openai, foundry" >&2
+                exit 1
+                ;;
+            esac
+          }
+
+          is_truthy() {
+            local value="${1:-}"
+            case "${value,,}" in
+              1|true|yes|y|on) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          is_allowed_azure_host() {
+            local host="${1,,}"
+            case "$host" in
+              openai.azure.com|*.openai.azure.com|services.ai.azure.com|*.services.ai.azure.com)
+                return 0
+                ;;
+              *)
+                return 1
+                ;;
+            esac
+          }
+
+          RESOLVED_APIKEY="${API_KEY:-${apiKey:-}}"
+          RAW_PROVIDER="${CLAUDECODE_FOUNDRY_PROVIDER:-${DETECTED_PROVIDER:-${CLAUDECODE_PROVIDER:-${PROVIDER:-${provider:-azure-foundry}}}}}"
+          RAW_PROVIDER="$(trim "$RAW_PROVIDER")"
+          RESOLVED_PROVIDER="$(normalize_provider "$RAW_PROVIDER")"
+          RESOLVED_BASEURL="${CLAUDECODE_FOUNDRY_BASE_URL:-${CLAUDECODE_BASE_URL:-${BASEURL:-${baseurl:-}}}}"
+          RESOLVED_BASEURL="$(trim "$RESOLVED_BASEURL")"
+          RESOLVED_MODELID="${CLAUDECODE_FOUNDRY_MODEL_ID:-${MODEL_ID:-${modelid:-${model:-}}}}"
+          RESOLVED_MODELID="$(trim "$RESOLVED_MODELID")"
+          RESOLVED_APIVERSION="${CLAUDECODE_FOUNDRY_API_VERSION:-${API_VERSION:-${apiVersion:-}}}"
+          RESOLVED_APIVERSION="$(trim "$RESOLVED_APIVERSION")"
+
+          if [[ "$RESOLVED_PROVIDER" != "azure-foundry" ]]; then
+            echo "::error title=ClaudeCode::Runtime only supports Azure Foundry. Resolved provider '$RESOLVED_PROVIDER' is not supported."
+            exit 1
+          fi
+
+          RESOLVED_BASEURL_HOST="${CLAUDECODE_FOUNDRY_BASE_URL_HOST:-}"
+          if [[ -z "$RESOLVED_BASEURL_HOST" ]]; then
+            if ! RESOLVED_BASEURL_HOST="$(node -e 'const value = process.argv[1]; if (!value || !value.trim()) { console.error("base_url is empty"); process.exit(1); } let parsed; try { parsed = new URL(value); } catch { console.error("base_url is not a valid URL"); process.exit(1); } if (parsed.protocol !== "https:") { console.error(`base_url must use https (received ${parsed.protocol || "unknown"})`); process.exit(1); } process.stdout.write(parsed.hostname.toLowerCase());' "$RESOLVED_BASEURL")"
+            then
+              echo "::error title=ClaudeCode::Invalid base_url '$RESOLVED_BASEURL'"
+              exit 1
+            fi
+          fi
+
+          ALLOW_NON_AZURE_BASE_URL_RAW="$(trim "${CLAUDECODE_ALLOW_NON_AZURE_BASE_URL:-}")"
+          BASE_URL_TRUSTED="false"
+          BASE_URL_TRUST_MODE="azure-allowlist"
+
+          if is_allowed_azure_host "$RESOLVED_BASEURL_HOST"; then
+            BASE_URL_TRUSTED="true"
+            BASE_URL_TRUST_MODE="azure-allowlist"
+          elif is_truthy "$ALLOW_NON_AZURE_BASE_URL_RAW"; then
+            BASE_URL_TRUSTED="true"
+            BASE_URL_TRUST_MODE="override-non-azure"
+            echo "::warning title=ClaudeCode::Allowing non-Azure base_url host '$RESOLVED_BASEURL_HOST' because CLAUDECODE_ALLOW_NON_AZURE_BASE_URL=true"
+          fi
+
+          if [[ "$BASE_URL_TRUSTED" != "true" ]]; then
+            echo "::error title=ClaudeCode::Refusing to export API key to untrusted base_url host '$RESOLVED_BASEURL_HOST'. Allowed hosts: *.openai.azure.com, *.services.ai.azure.com."
+            exit 1
+          fi
+
+          if [[ -z "${RESOLVED_MODELID//[[:space:]]/}" ]]; then
+            echo "::error title=ClaudeCode::ANTHROPIC_MODEL cannot be empty"
+            exit 1
+          fi
+
+          export CLAUDE_CODE_USE_FOUNDRY=1
+          export ANTHROPIC_FOUNDRY_BASE_URL="$RESOLVED_BASEURL"
+          export ANTHROPIC_FOUNDRY_API_KEY="$RESOLVED_APIKEY"
+          export ANTHROPIC_MODEL="$RESOLVED_MODELID"
+          if [[ -n "$RESOLVED_APIVERSION" ]]; then
+            export ANTHROPIC_FOUNDRY_API_VERSION="$RESOLVED_APIVERSION"
+          fi
+
+          {
+            echo "CLAUDECODE_SELECTED_PROVIDER=$RESOLVED_PROVIDER"
+            echo "CLAUDECODE_SELECTED_MODEL=$RESOLVED_MODELID"
+            echo "CLAUDECODE_SELECTED_BASE_URL_HOST=$RESOLVED_BASEURL_HOST"
+            echo "CLAUDECODE_SELECTED_BASE_URL_TRUST_MODE=$BASE_URL_TRUST_MODE"
+          } >> "$GITHUB_ENV"
+
+          echo "::notice title=ClaudeCode::Running mode '$RUN_KIND' in Azure Foundry runtime (provider='$RESOLVED_PROVIDER', model='$RESOLVED_MODELID', base_url_host='$RESOLVED_BASEURL_HOST', trust_mode='$BASE_URL_TRUST_MODE')"
+          node ./bin/claude-code-source --print --output-format text "$CLAUDE_PROMPT" | tee claudecode-output.txt
+          echo "::endgroup::"
+
+      - name: Commit, push branch, and create/update PR
+        if: success() && steps.gitctx.outputs.should_automate_pr == 'true'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH_NAME: ${{ steps.gitctx.outputs.branch_name }}
+          BASE_BRANCH: ${{ steps.gitctx.outputs.base_branch }}
+          ISSUE_NUMBER: ${{ needs.detect-trigger.outputs.issue_number }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$(git status --porcelain)" ]]; then
+            echo "::notice title=ClaudeCode::No file changes detected; skipping commit/PR automation"
+            {
+              echo "## Claude Code PR automation"
+              echo "- result: no changes to commit"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo "::notice title=ClaudeCode::No staged changes after git add; skipping"
+            exit 0
+          fi
+
+          COMMIT_MESSAGE="feat: resolve issue #${ISSUE_NUMBER} via Claude Code"
+          git commit -m "$COMMIT_MESSAGE"
+
+          gh auth setup-git
+          git push origin "HEAD:${BRANCH_NAME}"
+
+          EXISTING_PR_NUMBER="$(gh pr list --head "$BRANCH_NAME" --json number --jq '.[0].number' || true)"
+          PR_TITLE="feat: resolve issue #${ISSUE_NUMBER}"
+          PR_BODY="Automated implementation for #${ISSUE_NUMBER} generated by Claude Code CI."
+
+          if [[ -n "$EXISTING_PR_NUMBER" && "$EXISTING_PR_NUMBER" != "null" ]]; then
+            gh pr edit "$EXISTING_PR_NUMBER" --title "$PR_TITLE" --body "$PR_BODY"
+            PR_URL="$(gh pr view "$EXISTING_PR_NUMBER" --json url --jq '.url')"
+            echo "::notice title=ClaudeCode::Updated PR #$EXISTING_PR_NUMBER -> $PR_URL"
+          else
+            PR_URL="$(gh pr create --base "$BASE_BRANCH" --head "$BRANCH_NAME" --title "$PR_TITLE" --body "$PR_BODY")"
+            echo "::notice title=ClaudeCode::Created PR -> $PR_URL"
+          fi
+
+          gh issue comment "$ISSUE_NUMBER" --body "🤖 Implementación en curso completada. PR creado/actualizado: $PR_URL"
+
+          {
+            echo "## Claude Code PR automation"
+            echo "- branch: \`$BRANCH_NAME\`"
+            echo "- base: \`$BASE_BRANCH\`"
+            echo "- pr: $PR_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish run summary
+        if: always()
+        shell: bash
+        env:
+          RUN_KIND: ${{ needs.detect-trigger.outputs.run_kind }}
+        run: |
+          set -euo pipefail
+
+          SELECTED_PROVIDER="${CLAUDECODE_SELECTED_PROVIDER:-${CLAUDECODE_FOUNDRY_PROVIDER:-unknown}}"
+          SELECTED_MODEL="${CLAUDECODE_SELECTED_MODEL:-${CLAUDECODE_FOUNDRY_MODEL_ID:-unknown}}"
+          SELECTED_BASE_URL="${CLAUDECODE_FOUNDRY_BASE_URL:-${CLAUDECODE_BASE_URL:-${BASEURL:-${baseurl:-unknown}}}}"
+          SELECTED_BASE_URL_HOST="${CLAUDECODE_SELECTED_BASE_URL_HOST:-${CLAUDECODE_FOUNDRY_BASE_URL_HOST:-unknown}}"
+          SELECTED_BASE_URL_TRUST_MODE="${CLAUDECODE_SELECTED_BASE_URL_TRUST_MODE:-${CLAUDECODE_FOUNDRY_BASE_URL_TRUST_MODE:-unknown}}"
+          SELECTED_API_VERSION="${CLAUDECODE_FOUNDRY_API_VERSION:-${API_VERSION:-${apiVersion:-}}}"
+          if [[ -z "$SELECTED_API_VERSION" ]]; then
+            SELECTED_API_VERSION="default"
+          fi
+
+          {
+            echo "## Claude Code run"
+            echo "- run_kind: \`$RUN_KIND\`"
+            echo "- runtime: \`azure-foundry\`"
+            echo "- provider (normalized): \`$SELECTED_PROVIDER\`"
+            echo "- model: \`$SELECTED_MODEL\`"
+            echo "- base_url: \`$SELECTED_BASE_URL\`"
+            echo "- base_url host: \`$SELECTED_BASE_URL_HOST\`"
+            echo "- base_url trust mode: \`$SELECTED_BASE_URL_TRUST_MODE\`"
+            echo "- api_version: \`$SELECTED_API_VERSION\`"
+            echo "- workflow: \`${{ github.workflow }}\`"
+            echo "- run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            echo "### Output (first lines)"
+            if [[ -f claudecode-output.txt ]]; then
+              sed -n '1,80p' claudecode-output.txt
+            else
+              echo "No output file generated."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  claudecode-review:
+    needs: detect-trigger
+    if: needs.detect-trigger.outputs.should_run == 'true' && !(needs.detect-trigger.outputs.run_kind == 'issue_task' && needs.detect-trigger.outputs.has_pr_context != 'true')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+
+    env:
+      DISPATCH_PROVIDER: ${{ github.event.inputs.provider || '' }}
+      DISPATCH_MODEL_ID: ${{ github.event.inputs.model_id || '' }}
+      DISPATCH_BASE_URL: ${{ github.event.inputs.base_url || '' }}
+      DISPATCH_API_VERSION: ${{ github.event.inputs.api_version || '' }}
+      DETECTED_PROVIDER: ${{ needs.detect-trigger.outputs.provider }}
+      CLAUDECODE_ALLOW_NON_AZURE_BASE_URL: ${{ vars.CLAUDECODE_ALLOW_NON_AZURE_BASE_URL || '' }}
+
+      provider: ${{ vars.CLAUDECODE_PROVIDER || vars.OPENCODE_PROVIDER || vars.PROVIDER || vars.provider || 'azure-foundry' }}
+      PROVIDER: ${{ vars.CLAUDECODE_PROVIDER || vars.OPENCODE_PROVIDER || vars.PROVIDER || vars.provider || 'azure-foundry' }}
+      CLAUDECODE_PROVIDER: ${{ vars.CLAUDECODE_PROVIDER || vars.OPENCODE_PROVIDER || vars.PROVIDER || vars.provider || 'azure-foundry' }}
+
+      baseurl: ${{ vars.CLAUDECODE_BASE_URL || vars.OPENCODE_BASE_URL || vars.AZURE_OPENAI_ENDPOINT || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}
+      BASEURL: ${{ vars.CLAUDECODE_BASE_URL || vars.OPENCODE_BASE_URL || vars.AZURE_OPENAI_ENDPOINT || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}
+      CLAUDECODE_BASE_URL: ${{ vars.CLAUDECODE_BASE_URL || vars.OPENCODE_BASE_URL || vars.AZURE_OPENAI_ENDPOINT || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}
+      AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT || '' }}
+
+      modelid: ${{ vars.CLAUDECODE_MODEL_ID || vars.OPENCODE_MODEL_ID || vars.AZURE_OPENAI_DEPLOYMENT || vars.MODEL_ID || vars.modelid || vars.model || 'gpt-5.3-codex' }}
+      MODEL_ID: ${{ vars.CLAUDECODE_MODEL_ID || vars.OPENCODE_MODEL_ID || vars.AZURE_OPENAI_DEPLOYMENT || vars.MODEL_ID || vars.modelid || vars.model || 'gpt-5.3-codex' }}
+      model: ${{ vars.CLAUDECODE_MODEL_ID || vars.OPENCODE_MODEL_ID || vars.AZURE_OPENAI_DEPLOYMENT || vars.MODEL_ID || vars.modelid || vars.model || 'gpt-5.3-codex' }}
+      AZURE_OPENAI_DEPLOYMENT: ${{ vars.AZURE_OPENAI_DEPLOYMENT || '' }}
+
+      apiVersion: ${{ vars.CLAUDECODE_API_VERSION || vars.OPENCODE_API_VERSION || vars.AZURE_OPENAI_API_VERSION || vars.API_VERSION || vars.APIVERSION || vars.apiVersion || '' }}
+      API_VERSION: ${{ vars.CLAUDECODE_API_VERSION || vars.OPENCODE_API_VERSION || vars.AZURE_OPENAI_API_VERSION || vars.API_VERSION || vars.APIVERSION || vars.apiVersion || '' }}
+      AZURE_OPENAI_API_VERSION: ${{ vars.AZURE_OPENAI_API_VERSION || '' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Build project
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::group::Build"
+          npm run build
+          echo "::notice title=ClaudeCode::Build completed"
+          echo "::endgroup::"
+
+      - name: Configure Foundry runtime env
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          first_non_empty() {
+            local value=""
+            for value in "$@"; do
+              if [[ -n "${value:-}" ]]; then
+                printf '%s' "$value"
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          trim() {
+            local value="${1:-}"
+            value="${value#"${value%%[![:space:]]*}"}"
+            value="${value%"${value##*[![:space:]]}"}"
+            printf '%s' "$value"
+          }
+
+          normalize_provider() {
+            local input="${1:-}"
+            local normalized="${input,,}"
+
+            case "$normalized" in
+              azure|azure-foundry|azure-openai|foundry)
+                echo "azure-foundry"
+                ;;
+              *)
+                echo "::error title=ClaudeCode::Unsupported provider '$input'. Allowed values: azure, azure-foundry, azure-openai, foundry" >&2
+                exit 1
+                ;;
+            esac
+          }
+
+          is_truthy() {
+            local value="${1:-}"
+            case "${value,,}" in
+              1|true|yes|y|on) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          is_allowed_azure_host() {
+            local host="${1,,}"
+            case "$host" in
+              openai.azure.com|*.openai.azure.com|services.ai.azure.com|*.services.ai.azure.com)
+                return 0
+                ;;
+              *)
+                return 1
+                ;;
+            esac
+          }
+
+          RAW_PROVIDER="$(first_non_empty "${DETECTED_PROVIDER:-}" "${DISPATCH_PROVIDER:-}" "${CLAUDECODE_PROVIDER:-}" "${PROVIDER:-}" "${provider:-}" "azure-foundry")"
+          RAW_PROVIDER="$(trim "$RAW_PROVIDER")"
+          RESOLVED_PROVIDER="$(normalize_provider "$RAW_PROVIDER")"
+
+          RESOLVED_BASEURL="$(first_non_empty "${DISPATCH_BASE_URL:-}" "${CLAUDECODE_BASE_URL:-}" "${AZURE_OPENAI_ENDPOINT:-}" "${BASEURL:-}" "${baseurl:-}" "https://openslab-resource.openai.azure.com/openai/v1")"
+          RESOLVED_BASEURL="$(trim "$RESOLVED_BASEURL")"
+
+          RAW_MODELID="$(first_non_empty "${DISPATCH_MODEL_ID:-}" "${CLAUDECODE_MODEL_ID:-}" "${AZURE_OPENAI_DEPLOYMENT:-}" "${MODEL_ID:-}" "${modelid:-}" "${model:-}" "gpt-5.3-codex")"
+          RAW_MODELID="$(trim "$RAW_MODELID")"
+
+          RESOLVED_APIVERSION="$(first_non_empty "${DISPATCH_API_VERSION:-}" "${CLAUDECODE_API_VERSION:-}" "${AZURE_OPENAI_API_VERSION:-}" "${API_VERSION:-}" "${apiVersion:-}" "")"
+          RESOLVED_APIVERSION="$(trim "$RESOLVED_APIVERSION")"
+
+          ALLOW_NON_AZURE_BASE_URL_RAW="$(trim "${CLAUDECODE_ALLOW_NON_AZURE_BASE_URL:-}")"
+
+          if [[ -z "${RAW_MODELID//[[:space:]]/}" ]]; then
+            echo "::error title=ClaudeCode::model_id cannot be empty after resolution"
+            exit 1
+          fi
+
+          if ! RESOLVED_BASEURL_HOST="$(node -e 'const value = process.argv[1]; if (!value || !value.trim()) { console.error("base_url is empty"); process.exit(1); } let parsed; try { parsed = new URL(value); } catch { console.error("base_url is not a valid URL"); process.exit(1); } if (parsed.protocol !== "https:") { console.error(`base_url must use https (received ${parsed.protocol || "unknown"})`); process.exit(1); } process.stdout.write(parsed.hostname.toLowerCase());' "$RESOLVED_BASEURL")"
+          then
+            echo "::error title=ClaudeCode::Invalid base_url '$RESOLVED_BASEURL'"
+            exit 1
+          fi
+
+          BASE_URL_TRUST_MODE="azure-allowlist"
+          if is_allowed_azure_host "$RESOLVED_BASEURL_HOST"; then
+            BASE_URL_TRUSTED="true"
+          elif is_truthy "$ALLOW_NON_AZURE_BASE_URL_RAW"; then
+            BASE_URL_TRUSTED="true"
+            BASE_URL_TRUST_MODE="override-non-azure"
+            echo "::warning title=ClaudeCode::Using non-Azure base_url host '$RESOLVED_BASEURL_HOST' because CLAUDECODE_ALLOW_NON_AZURE_BASE_URL=true. API key will be sent to this host."
+          else
+            echo "::error title=ClaudeCode::base_url host '$RESOLVED_BASEURL_HOST' is not allowed. Allowed hosts: *.openai.azure.com, *.services.ai.azure.com. Set CLAUDECODE_ALLOW_NON_AZURE_BASE_URL=true only for trusted non-Azure endpoints."
+            exit 1
+          fi
+
+          RESOLVED_MODELID="$RAW_MODELID"
+          if [[ "${RESOLVED_MODELID,,}" == azure-foundry/* ]]; then
+            RESOLVED_MODELID="${RESOLVED_MODELID#*/}"
+            echo "::notice title=ClaudeCode::Normalized model_id '$RAW_MODELID' -> '$RESOLVED_MODELID'"
+          fi
+
+          if [[ -z "${RESOLVED_MODELID//[[:space:]]/}" ]]; then
+            echo "::error title=ClaudeCode::model_id resolved to empty after normalization"
+            exit 1
+          fi
+
+          {
+            echo "CLAUDECODE_FOUNDRY_PROVIDER=$RESOLVED_PROVIDER"
+            echo "CLAUDECODE_FOUNDRY_PROVIDER_INPUT=$RAW_PROVIDER"
+            echo "CLAUDECODE_FOUNDRY_BASE_URL=$RESOLVED_BASEURL"
+            echo "CLAUDECODE_FOUNDRY_BASE_URL_HOST=$RESOLVED_BASEURL_HOST"
+            echo "CLAUDECODE_FOUNDRY_BASE_URL_TRUSTED=$BASE_URL_TRUSTED"
+            echo "CLAUDECODE_FOUNDRY_BASE_URL_TRUST_MODE=$BASE_URL_TRUST_MODE"
+            echo "CLAUDECODE_FOUNDRY_MODEL_ID_RAW=$RAW_MODELID"
+            echo "CLAUDECODE_FOUNDRY_MODEL_ID=$RESOLVED_MODELID"
+            echo "CLAUDECODE_FOUNDRY_API_VERSION=$RESOLVED_APIVERSION"
+          } >> "$GITHUB_ENV"
+
+          echo "::notice title=ClaudeCode::Azure Foundry mode active (provider='$RESOLVED_PROVIDER', model='$RESOLVED_MODELID', base_url_host='$RESOLVED_BASEURL_HOST', trust_mode='$BASE_URL_TRUST_MODE', api_version='${RESOLVED_APIVERSION:-default}')"
+
+          {
+            echo "## Claude Code runtime config"
+            echo "- provider input: \`$RAW_PROVIDER\`"
+            echo "- provider normalized: \`$RESOLVED_PROVIDER\`"
+            echo "- runtime: \`azure-foundry\`"
+            echo "- model_id (resolved): \`$RAW_MODELID\`"
+            echo "- model_id (ANTHROPIC_MODEL): \`$RESOLVED_MODELID\`"
+            echo "- base_url: \`$RESOLVED_BASEURL\`"
+            echo "- base_url host: \`$RESOLVED_BASEURL_HOST\`"
+            echo "- base_url trust mode: \`$BASE_URL_TRUST_MODE\`"
+            echo "- api_version: \`${RESOLVED_APIVERSION:-default}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build effective prompt
+        id: prompt
+        shell: bash
+        env:
+          INPUT_PROMPT: ${{ needs.detect-trigger.outputs.prompt }}
+        run: |
+          set -euo pipefail
+
+          EFFECTIVE_PROMPT="$INPUT_PROMPT"
+          if [[ -z "${EFFECTIVE_PROMPT//[[:space:]]/}" ]]; then
+            EFFECTIVE_PROMPT="Please analyze the current repository state and provide actionable recommendations."
+          fi
+
+          DELIM="CLAUDECODE_PROMPT_$(date +%s)_$RANDOM"
+          {
+            echo "effective_prompt<<$DELIM"
+            echo "$EFFECTIVE_PROMPT"
+            echo "$DELIM"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "::notice title=ClaudeCode::Effective prompt prepared (review mode)"
+
+      - name: Run Claude Code
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          apiKey: ${{ secrets.CLAUDECODE_API_KEY || secrets.OPENCODE_API_KEY || secrets.AZURE_OPENAI_API_KEY || secrets.AZURE_API_KEY || secrets.API_KEY || secrets.apiKey || '' }}
+          API_KEY: ${{ secrets.CLAUDECODE_API_KEY || secrets.OPENCODE_API_KEY || secrets.AZURE_OPENAI_API_KEY || secrets.AZURE_API_KEY || secrets.API_KEY || secrets.apiKey || '' }}
+          AZURE_API_KEY: ${{ secrets.CLAUDECODE_API_KEY || secrets.OPENCODE_API_KEY || secrets.AZURE_OPENAI_API_KEY || secrets.AZURE_API_KEY || secrets.API_KEY || secrets.apiKey || '' }}
+          RUN_KIND: ${{ needs.detect-trigger.outputs.run_kind }}
+          CLAUDE_PROMPT: ${{ steps.prompt.outputs.effective_prompt }}
+        run: |
+          set -euo pipefail
+          echo "::group::Claude Code"
+
+          if [[ -z "${API_KEY:-}" && -z "${apiKey:-}" ]]; then
+            echo "::error title=ClaudeCode::Missing Foundry API key (apiKey/API_KEY secret)"
+            exit 1
+          fi
+
+          trim() {
+            local value="${1:-}"
+            value="${value#"${value%%[![:space:]]*}"}"
+            value="${value%"${value##*[![:space:]]}"}"
+            printf '%s' "$value"
+          }
+
+          normalize_provider() {
+            local input="${1:-}"
+            local normalized="${input,,}"
+
+            case "$normalized" in
+              azure|azure-foundry|azure-openai|foundry)
+                echo "azure-foundry"
+                ;;
+              *)
+                echo "::error title=ClaudeCode::Unsupported provider '$input'. Allowed values: azure, azure-foundry, azure-openai, foundry" >&2
+                exit 1
+                ;;
+            esac
+          }
+
+          is_truthy() {
+            local value="${1:-}"
+            case "${value,,}" in
+              1|true|yes|y|on) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          is_allowed_azure_host() {
+            local host="${1,,}"
+            case "$host" in
+              openai.azure.com|*.openai.azure.com|services.ai.azure.com|*.services.ai.azure.com)
+                return 0
+                ;;
+              *)
+                return 1
+                ;;
+            esac
+          }
+
+          RESOLVED_APIKEY="${API_KEY:-${apiKey:-}}"
+          RAW_PROVIDER="${CLAUDECODE_FOUNDRY_PROVIDER:-${DETECTED_PROVIDER:-${CLAUDECODE_PROVIDER:-${PROVIDER:-${provider:-azure-foundry}}}}}"
+          RAW_PROVIDER="$(trim "$RAW_PROVIDER")"
+          RESOLVED_PROVIDER="$(normalize_provider "$RAW_PROVIDER")"
+          RESOLVED_BASEURL="${CLAUDECODE_FOUNDRY_BASE_URL:-${CLAUDECODE_BASE_URL:-${BASEURL:-${baseurl:-}}}}"
+          RESOLVED_BASEURL="$(trim "$RESOLVED_BASEURL")"
+          RESOLVED_MODELID="${CLAUDECODE_FOUNDRY_MODEL_ID:-${MODEL_ID:-${modelid:-${model:-}}}}"
+          RESOLVED_MODELID="$(trim "$RESOLVED_MODELID")"
+          RESOLVED_APIVERSION="${CLAUDECODE_FOUNDRY_API_VERSION:-${API_VERSION:-${apiVersion:-}}}"
+          RESOLVED_APIVERSION="$(trim "$RESOLVED_APIVERSION")"
+
+          if [[ "$RESOLVED_PROVIDER" != "azure-foundry" ]]; then
+            echo "::error title=ClaudeCode::Runtime only supports Azure Foundry. Resolved provider '$RESOLVED_PROVIDER' is not supported."
+            exit 1
+          fi
+
+          RESOLVED_BASEURL_HOST="${CLAUDECODE_FOUNDRY_BASE_URL_HOST:-}"
+          if [[ -z "$RESOLVED_BASEURL_HOST" ]]; then
+            if ! RESOLVED_BASEURL_HOST="$(node -e 'const value = process.argv[1]; if (!value || !value.trim()) { console.error("base_url is empty"); process.exit(1); } let parsed; try { parsed = new URL(value); } catch { console.error("base_url is not a valid URL"); process.exit(1); } if (parsed.protocol !== "https:") { console.error(`base_url must use https (received ${parsed.protocol || "unknown"})`); process.exit(1); } process.stdout.write(parsed.hostname.toLowerCase());' "$RESOLVED_BASEURL")"
+            then
+              echo "::error title=ClaudeCode::Invalid base_url '$RESOLVED_BASEURL'"
+              exit 1
+            fi
+          fi
+
+          ALLOW_NON_AZURE_BASE_URL_RAW="$(trim "${CLAUDECODE_ALLOW_NON_AZURE_BASE_URL:-}")"
+          BASE_URL_TRUSTED="false"
+          BASE_URL_TRUST_MODE="azure-allowlist"
+
+          if is_allowed_azure_host "$RESOLVED_BASEURL_HOST"; then
+            BASE_URL_TRUSTED="true"
+            BASE_URL_TRUST_MODE="azure-allowlist"
+          elif is_truthy "$ALLOW_NON_AZURE_BASE_URL_RAW"; then
+            BASE_URL_TRUSTED="true"
+            BASE_URL_TRUST_MODE="override-non-azure"
+            echo "::warning title=ClaudeCode::Allowing non-Azure base_url host '$RESOLVED_BASEURL_HOST' because CLAUDECODE_ALLOW_NON_AZURE_BASE_URL=true"
+          fi
+
+          if [[ "$BASE_URL_TRUSTED" != "true" ]]; then
+            echo "::error title=ClaudeCode::Refusing to export API key to untrusted base_url host '$RESOLVED_BASEURL_HOST'. Allowed hosts: *.openai.azure.com, *.services.ai.azure.com."
+            exit 1
+          fi
+
+          if [[ -z "${RESOLVED_MODELID//[[:space:]]/}" ]]; then
+            echo "::error title=ClaudeCode::ANTHROPIC_MODEL cannot be empty"
+            exit 1
+          fi
+
+          export CLAUDE_CODE_USE_FOUNDRY=1
+          export ANTHROPIC_FOUNDRY_BASE_URL="$RESOLVED_BASEURL"
+          export ANTHROPIC_FOUNDRY_API_KEY="$RESOLVED_APIKEY"
+          export ANTHROPIC_MODEL="$RESOLVED_MODELID"
+          if [[ -n "$RESOLVED_APIVERSION" ]]; then
+            export ANTHROPIC_FOUNDRY_API_VERSION="$RESOLVED_APIVERSION"
+          fi
+
+          {
+            echo "CLAUDECODE_SELECTED_PROVIDER=$RESOLVED_PROVIDER"
+            echo "CLAUDECODE_SELECTED_MODEL=$RESOLVED_MODELID"
+            echo "CLAUDECODE_SELECTED_BASE_URL_HOST=$RESOLVED_BASEURL_HOST"
+            echo "CLAUDECODE_SELECTED_BASE_URL_TRUST_MODE=$BASE_URL_TRUST_MODE"
+          } >> "$GITHUB_ENV"
+
+          echo "::notice title=ClaudeCode::Running mode '$RUN_KIND' in Azure Foundry runtime (provider='$RESOLVED_PROVIDER', model='$RESOLVED_MODELID', base_url_host='$RESOLVED_BASEURL_HOST', trust_mode='$BASE_URL_TRUST_MODE')"
+          node ./bin/claude-code-source --print --output-format text "$CLAUDE_PROMPT" | tee claudecode-output.txt
+          echo "::endgroup::"
+
+      - name: Publish run summary
+        if: always()
+        shell: bash
+        env:
+          RUN_KIND: ${{ needs.detect-trigger.outputs.run_kind }}
+        run: |
+          set -euo pipefail
+
+          SELECTED_PROVIDER="${CLAUDECODE_SELECTED_PROVIDER:-${CLAUDECODE_FOUNDRY_PROVIDER:-unknown}}"
+          SELECTED_MODEL="${CLAUDECODE_SELECTED_MODEL:-${CLAUDECODE_FOUNDRY_MODEL_ID:-unknown}}"
+          SELECTED_BASE_URL="${CLAUDECODE_FOUNDRY_BASE_URL:-${CLAUDECODE_BASE_URL:-${BASEURL:-${baseurl:-unknown}}}}"
+          SELECTED_BASE_URL_HOST="${CLAUDECODE_SELECTED_BASE_URL_HOST:-${CLAUDECODE_FOUNDRY_BASE_URL_HOST:-unknown}}"
+          SELECTED_BASE_URL_TRUST_MODE="${CLAUDECODE_SELECTED_BASE_URL_TRUST_MODE:-${CLAUDECODE_FOUNDRY_BASE_URL_TRUST_MODE:-unknown}}"
+          SELECTED_API_VERSION="${CLAUDECODE_FOUNDRY_API_VERSION:-${API_VERSION:-${apiVersion:-}}}"
+          if [[ -z "$SELECTED_API_VERSION" ]]; then
+            SELECTED_API_VERSION="default"
+          fi
+
+          {
+            echo "## Claude Code run"
+            echo "- run_kind: \`$RUN_KIND\`"
+            echo "- runtime: \`azure-foundry\`"
+            echo "- provider (normalized): \`$SELECTED_PROVIDER\`"
+            echo "- model: \`$SELECTED_MODEL\`"
+            echo "- base_url: \`$SELECTED_BASE_URL\`"
+            echo "- base_url host: \`$SELECTED_BASE_URL_HOST\`"
+            echo "- base_url trust mode: \`$SELECTED_BASE_URL_TRUST_MODE\`"
+            echo "- api_version: \`$SELECTED_API_VERSION\`"
+            echo "- workflow: \`${{ github.workflow }}\`"
+            echo "- run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            echo "### Output (first lines)"
+            if [[ -f claudecode-output.txt ]]; then
+              sed -n '1,80p' claudecode-output.txt
+            else
+              echo "No output file generated."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

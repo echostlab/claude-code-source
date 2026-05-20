@@ -1,7 +1,53 @@
 {
-  "name": "opencode-plugins",
-  "private": true,
+  "name": "claude-code-source",
+  "version": "0.1.0",
+  "description": "Empaquetado npm del código fuente de Claude Code con build usando Bun.",
+  "private": false,
+  "author": "echostlab",
+  "keywords": [
+    "claude-code",
+    "cli",
+    "bun",
+    "npm-package"
+  ],
+  "homepage": "https://github.com/echostlab/claude-code-source#readme",
+  "bugs": {
+    "url": "https://github.com/echostlab/claude-code-source/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/echostlab/claude-code-source.git"
+  },
+  "license": "SEE LICENSE IN LICENSE.md",
   "type": "module",
+  "main": "./dist/cli.js",
+  "exports": {
+    ".": "./dist/cli.js"
+  },
+  "preferGlobal": true,
+  "bin": {
+    "claude-code-source": "bin/claude-code-source"
+  },
+  "files": [
+    "dist/",
+    "src/",
+    "bin/",
+    "scripts/",
+    "docs/guia-empaquetado-npm.md",
+    "README.md",
+    "LICENSE.md"
+  ],
+  "engines": {
+    "node": ">=18",
+    "bun": ">=1.2.0"
+  },
+  "scripts": {
+    "check:bun": "node ./scripts/require-bun.cjs",
+    "prebuild": "npm run check:bun",
+    "build": "node ./scripts/build-cli.cjs",
+    "prepack": "npm run build",
+    "pack:dry": "npm pack --dry-run"
+  },
   "dependencies": {},
   "devDependencies": {
     "unique-names-generator": "4.7.1",

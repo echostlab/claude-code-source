@@ -2,19 +2,19 @@ name: opencode
 
 on:
   pull_request:
-    types:
-      - opened
-      - synchronize
-      - reopened
-      - ready_for_review
-
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+  issues:
+    types: [opened, edited, reopened]
   issue_comment:
-    types:
-      - created
-
+    types: [created]
   pull_request_review_comment:
-    types:
-      - created
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: Prompt to run in CI
+        required: false
+        type: string
 
 concurrency:
   group: opencode-review-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
@@ -23,7 +23,6 @@ concurrency:
 jobs:
   detect-trigger:
     runs-on: ubuntu-latest
-
     outputs:
       should_run: ${{ steps.check.outputs.should_run }}
       run_kind: ${{ steps.check.outputs.run_kind }}
@@ -35,46 +34,70 @@ jobs:
       variant: ${{ steps.check.outputs.variant }}
       share: ${{ steps.check.outputs.share }}
       session_metadata: ${{ steps.check.outputs.session_metadata }}
+      prompt: ${{ steps.check.outputs.prompt }}
 
     steps:
       - id: check
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
+          HAS_PR: ${{ github.event.pull_request.number != null || github.event.issue.pull_request != null }}
           COMMENT_BODY: ${{ github.event.comment.body || '' }}
           COMMENT_AUTHOR_ASSOCIATION: ${{ github.event.comment.author_association || '' }}
-
-          TRUSTED_AUTHOR_ASSOCIATIONS: OWNER,MEMBER,COLLABORATOR
-          ALLOWED_AGENT_OVERRIDES: build,plan,reviewer
-          ALLOWED_VARIANT_OVERRIDES: default
-
-          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || '' }}
+          COMMENT_AUTHOR_LOGIN: ${{ github.event.comment.user.login || '' }}
+          GITHUB_ACTOR_LOGIN: ${{ github.actor }}
           ISSUE_NUMBER: ${{ github.event.issue.number || '' }}
-
-          HAS_PR:
-            ${{ github.event.pull_request.number != null || github.event.issue.pull_request != null }}
-
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || '' }}
+          ISSUE_TITLE: ${{ github.event.issue.title || '' }}
+          ISSUE_BODY: ${{ github.event.issue.body || '' }}
+          PR_TITLE: ${{ github.event.pull_request.title || '' }}
+          PR_BODY: ${{ github.event.pull_request.body || '' }}
+          WORKFLOW_PROMPT: ${{ inputs.prompt || vars.OPENCODE_WORKFLOW_PROMPT || '' }}
+          TRUSTED_AUTHOR_ASSOCIATIONS: OWNER,MEMBER,COLLABORATOR
+          ALLOWED_SLASH_ACTORS: ${{ vars.OPENCODE_ALLOWED_SLASH_ACTORS || '' }}
+          ALLOWED_AGENT_OVERRIDES: build,plan,reviewer
+          ALLOWED_VARIANT_OVERRIDES: ${{ vars.OPENCODE_ALLOWED_VARIANT_OVERRIDES || 'default,xhigh' }}
+          DEFAULT_PROVIDER: ${{ vars.OPENCODE_PROVIDER || 'azure-foundry' }}
+          DEFAULT_MODEL_ID: ${{ vars.OPENCODE_MODEL_ID || vars.MODEL_ID || vars.modelid || vars.model || 'gpt-5.3-codex' }}
         run: |
           set -euo pipefail
 
-          resolve_model() {
-            local input="${1:-gpt-5.3-codex}"
+          echo "::group::OpenCode trigger detection"
+          echo "::notice title=OpenCode::Evaluating event '$EVENT_NAME'"
 
-            case "$input" in
-              gpt-5.3-codex)
-                echo "azure-foundry/gpt-5.3-codex"
-                ;;
-              azure-foundry/*)
-                echo "$input"
-                ;;
-              *)
-                echo "azure-foundry/gpt-5.3-codex"
-                ;;
-            esac
+          resolve_model() {
+            local input="${1:-}"
+            local provider="${DEFAULT_PROVIDER:-azure-foundry}"
+            local model_id="${DEFAULT_MODEL_ID:-gpt-5.3-codex}"
+
+            if [[ -z "$input" ]]; then
+              echo "${provider}/${model_id}"
+              return
+            fi
+
+            if [[ "$input" == */* ]]; then
+              echo "$input"
+              return
+            fi
+
+            echo "${provider}/${input}"
           }
 
           extract_provider() {
             echo "${1%%/*}"
+          }
+
+          normalize_provider() {
+            local input="${1:-}"
+            local normalized="${input,,}"
+            normalized="${normalized//[[:space:]]/}"
+
+            if [[ -z "$normalized" ]]; then
+              normalized="${DEFAULT_PROVIDER:-azure-foundry}"
+              normalized="${normalized,,}"
+            fi
+
+            echo "$normalized"
           }
 
           extract_flag() {
@@ -94,7 +117,6 @@ jobs:
             local candidate=""
 
             normalized_probe="${normalized_probe,,}"
-
             IFS=',' read -r -a _items <<< "$csv_list"
             for candidate in "${_items[@]}"; do
               candidate="${candidate//[[:space:]]/}"
@@ -103,7 +125,6 @@ jobs:
                 return 0
               fi
             done
-
             return 1
           }
 
@@ -115,14 +136,13 @@ jobs:
           fail_invalid_flag() {
             local key="$1"
             local reason="$2"
-            echo "::error::Invalid /oc flag '${key}=': ${reason}"
+            echo "::error::Invalid slash flag '${key}=': ${reason}"
             exit 1
           }
 
           require_non_empty_flag_value() {
             local key="$1"
             local value="$2"
-
             if [[ -z "$value" ]]; then
               fail_invalid_flag "$key" "missing value"
             fi
@@ -135,15 +155,12 @@ jobs:
             if [[ ! "$normalized" =~ ^[a-z0-9][a-z0-9_-]{0,63}$ ]]; then
               fail_invalid_flag "agent" "value '$input' has invalid format"
             fi
-
             if ! is_trusted_comment_author; then
               fail_invalid_flag "agent" "override requires trusted author association (${TRUSTED_AUTHOR_ASSOCIATIONS}), got '${COMMENT_AUTHOR_ASSOCIATION:-NONE}'"
             fi
-
             if ! csv_contains "$ALLOWED_AGENT_OVERRIDES" "$normalized"; then
               fail_invalid_flag "agent" "value '$input' is not allowlisted for this repo (allowed: ${ALLOWED_AGENT_OVERRIDES})"
             fi
-
             echo "$normalized"
           }
 
@@ -151,93 +168,138 @@ jobs:
             local input="${1:-}"
             local normalized="${input,,}"
 
-            # Repo policy: variant overrides are explicit-allowlist only.
-            # Keep ALLOWED_VARIANT_OVERRIDES in sync with supported variants.
-            if ! csv_contains "$ALLOWED_VARIANT_OVERRIDES" "$normalized"; then
-              fail_invalid_flag "variant" "value '$input' is not allowlisted (allowed: ${ALLOWED_VARIANT_OVERRIDES})"
+            if [[ "$normalized" == "xhight" ]]; then
+              echo "::notice::Normalizing legacy variant value 'xhight' to 'xhigh'."
+              normalized="xhigh"
             fi
 
+            if ! csv_contains "$ALLOWED_VARIANT_OVERRIDES" "$normalized"; then
+              fail_invalid_flag "variant" "value '$input' (normalized: '$normalized') is not allowlisted (allowed: ${ALLOWED_VARIANT_OVERRIDES})"
+            fi
             echo "$normalized"
           }
 
           validate_share() {
             local input="${1:-}"
             local normalized="${input,,}"
-
             case "$normalized" in
-              auto|manual|disabled)
-                echo "$normalized"
-                ;;
-              *)
-                fail_invalid_flag "share" "value '$input' must be one of: auto, manual, disabled"
-                ;;
+              auto|manual|disabled) echo "$normalized" ;;
+              *) fail_invalid_flag "share" "value '$input' must be one of: auto, manual, disabled" ;;
             esac
           }
 
           validate_session() {
             local input="${1:-}"
-            local normalized="$input"
-
-            if [[ ! "$normalized" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$ ]]; then
+            if [[ ! "$input" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$ ]]; then
               fail_invalid_flag "session" "value '$input' has invalid format"
             fi
+            echo "$input"
+          }
 
-            echo "$normalized"
+          extract_slash_command() {
+            local first_token=""
+            first_token="$(echo "$COMMENT_BODY" | grep -oE '^[[:space:]]*/[A-Za-z0-9_-]+' | head -1 || true)"
+            first_token="${first_token##*/}"
+            echo "${first_token,,}"
+          }
+
+          is_trusted_slash_actor() {
+            local association="${COMMENT_AUTHOR_ASSOCIATION^^}"
+            local comment_login="${COMMENT_AUTHOR_LOGIN,,}"
+            local actor_login="${GITHUB_ACTOR_LOGIN,,}"
+
+            if csv_contains "$TRUSTED_AUTHOR_ASSOCIATIONS" "$association"; then
+              return 0
+            fi
+
+            if [[ -n "$comment_login" ]] && csv_contains "$ALLOWED_SLASH_ACTORS" "$comment_login"; then
+              return 0
+            fi
+
+            if [[ -n "$actor_login" ]] && csv_contains "$ALLOWED_SLASH_ACTORS" "$actor_login"; then
+              return 0
+            fi
+
+            return 1
           }
 
           SHOULD_RUN="false"
           RUN_KIND="none"
-
-          FULL_MODEL="$(resolve_model "gpt-5.3-codex")"
+          FULL_MODEL="$(resolve_model "")"
           SELECTED_AGENT=""
           SELECTED_VARIANT=""
           SELECTED_SHARE=""
           SESSION_METADATA=""
+          PROMPT=""
 
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
             SHOULD_RUN="true"
             RUN_KIND="auto_pr_review"
-
+            PROMPT="${PR_BODY:-}"
+            if [[ -z "${PROMPT//[[:space:]]/}" ]]; then
+              PROMPT="Review this pull request thoroughly. Summarize risks, defects, and suggested fixes."
+            fi
+          elif [[ "$EVENT_NAME" == "issues" ]]; then
+            SHOULD_RUN="true"
+            RUN_KIND="issue_task"
+            PROMPT="${ISSUE_BODY:-}"
+            if [[ -z "${PROMPT//[[:space:]]/}" ]]; then
+              PROMPT="$ISSUE_TITLE"
+            fi
+          elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            SHOULD_RUN="true"
+            RUN_KIND="manual_workflow"
+            PROMPT="$WORKFLOW_PROMPT"
           elif [[ "$EVENT_NAME" == "issue_comment" || "$EVENT_NAME" == "pull_request_review_comment" ]]; then
-
-            if echo "$COMMENT_BODY" | grep -qiE '(^|[[:space:]])/(oc|opencode)\b'; then
-
-              SELECTED_MODEL="$(extract_flag "model")"
-              FULL_MODEL="$(resolve_model "${SELECTED_MODEL:-gpt-5.3-codex}")"
-
-              if has_flag "agent"; then
-                RAW_AGENT="$(extract_flag "agent")"
-                require_non_empty_flag_value "agent" "$RAW_AGENT"
-                SELECTED_AGENT="$(validate_agent "$RAW_AGENT")"
-              fi
-
-              if has_flag "variant"; then
-                RAW_VARIANT="$(extract_flag "variant")"
-                require_non_empty_flag_value "variant" "$RAW_VARIANT"
-                SELECTED_VARIANT="$(validate_variant "$RAW_VARIANT")"
-              fi
-
-              if has_flag "share"; then
-                RAW_SHARE="$(extract_flag "share")"
-                require_non_empty_flag_value "share" "$RAW_SHARE"
-                SELECTED_SHARE="$(validate_share "$RAW_SHARE")"
-              fi
-
-              if has_flag "session"; then
-                RAW_SESSION="$(extract_flag "session")"
-                require_non_empty_flag_value "session" "$RAW_SESSION"
-                VALID_SESSION="$(validate_session "$RAW_SESSION")"
-                SESSION_METADATA="session=$VALID_SESSION"
-              fi
-
-              if [[ "$HAS_PR" == "true" ]]; then
-                SHOULD_RUN="true"
-                RUN_KIND="manual_pr_review"
+            local_command="$(extract_slash_command)"
+            if [[ "$local_command" == "oc" || "$local_command" == "opencode" ]]; then
+              if ! is_trusted_slash_actor; then
+                echo "::notice::Ignoring slash command from untrusted actor '${COMMENT_AUTHOR_LOGIN:-unknown}' (${COMMENT_AUTHOR_ASSOCIATION:-NONE})."
               else
+                PROMPT="$COMMENT_BODY"
+                SELECTED_MODEL="$(extract_flag "model")"
+                FULL_MODEL="$(resolve_model "${SELECTED_MODEL:-}")"
+
+                if has_flag "agent"; then
+                  RAW_AGENT="$(extract_flag "agent")"
+                  require_non_empty_flag_value "agent" "$RAW_AGENT"
+                  SELECTED_AGENT="$(validate_agent "$RAW_AGENT")"
+                fi
+                if has_flag "variant"; then
+                  RAW_VARIANT="$(extract_flag "variant")"
+                  require_non_empty_flag_value "variant" "$RAW_VARIANT"
+                  SELECTED_VARIANT="$(validate_variant "$RAW_VARIANT")"
+                fi
+                if has_flag "share"; then
+                  RAW_SHARE="$(extract_flag "share")"
+                  require_non_empty_flag_value "share" "$RAW_SHARE"
+                  SELECTED_SHARE="$(validate_share "$RAW_SHARE")"
+                fi
+                if has_flag "session"; then
+                  RAW_SESSION="$(extract_flag "session")"
+                  require_non_empty_flag_value "session" "$RAW_SESSION"
+                  VALID_SESSION="$(validate_session "$RAW_SESSION")"
+                  SESSION_METADATA="session=$VALID_SESSION"
+                fi
+
                 SHOULD_RUN="true"
-                RUN_KIND="issue_task"
+                if [[ "$HAS_PR" == "true" ]]; then
+                  RUN_KIND="manual_pr_review"
+                else
+                  RUN_KIND="issue_task"
+                fi
               fi
             fi
+          fi
+
+          if [[ "$SHOULD_RUN" == "true" ]]; then
+            echo "::notice title=OpenCode::Selected run_kind='$RUN_KIND'"
+          else
+            echo "::warning title=OpenCode::No runnable trigger detected for event '$EVENT_NAME'"
+          fi
+
+          if [[ -z "${PROMPT//[[:space:]]/}" ]]; then
+            PROMPT="$WORKFLOW_PROMPT"
           fi
 
           {
@@ -246,20 +308,31 @@ jobs:
             echo "pr_number=$PR_NUMBER"
             echo "issue_number=$ISSUE_NUMBER"
             echo "model=$FULL_MODEL"
-            echo "provider=$(extract_provider "$FULL_MODEL")"
+            echo "provider=$(normalize_provider "$(extract_provider "$FULL_MODEL")")"
             echo "agent=$SELECTED_AGENT"
             echo "variant=$SELECTED_VARIANT"
             echo "share=$SELECTED_SHARE"
             echo "session_metadata=$SESSION_METADATA"
+            echo "prompt<<EOF_PROMPT"
+            echo "$PROMPT"
+            echo "EOF_PROMPT"
           } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## OpenCode trigger"
+            echo "- event: \\`$EVENT_NAME\\`"
+            echo "- should_run: \\`$SHOULD_RUN\\`"
+            echo "- run_kind: \\`$RUN_KIND\\`"
+            echo "- model: \\`$FULL_MODEL\\`"
+            echo "- provider: \\`$(normalize_provider "$(extract_provider "$FULL_MODEL")")\\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "::endgroup::"
 
   opencode:
     needs: detect-trigger
-
     if: needs.detect-trigger.outputs.should_run == 'true'
-
     runs-on: ubuntu-latest
-
     permissions:
       contents: write
       pull-requests: write
@@ -276,130 +349,228 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          
-      - name: Install repo dependencies (optional)
-        run: sudo npm install -g --no-audit --no-fund 
 
-      - uses: oven-sh/setup-bun@v2
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: "1.3.14"
 
-      - name: Set Azure OpenAI env vars
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Build project
         shell: bash
         run: |
-          {
-            echo "AZURE_OPENAI_API_KEY=${{ secrets.AZURE_API_KEY }}"
-            echo "AZURE_API_KEY=${{ secrets.AZURE_API_KEY }}"
-          } >> "$GITHUB_ENV"
+          set -euo pipefail
+          echo "::group::Build"
+          npm run build
+          echo "::notice title=OpenCode::Build completed"
+          echo "::endgroup::"
 
-      - name: Compose OpenCode prompt
-        id: compose
+      - name: Set OpenCode provider env vars
+        id: provider-env
         shell: bash
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          EXECUTION_METADATA: ${{ needs.detect-trigger.outputs.session_metadata }}
-
-          COMMENT_BODY: ${{ github.event.comment.body || '' }}
-
-          ISSUE_TITLE: ${{ github.event.issue.title || '' }}
-          ISSUE_BODY: ${{ github.event.issue.body || '' }}
-
-          PR_TITLE: ${{ github.event.pull_request.title || '' }}
-          PR_BODY: ${{ github.event.pull_request.body || '' }}
-
+          DETECTED_MODEL: ${{ needs.detect-trigger.outputs.model }}
+          DETECTED_PROVIDER: ${{ needs.detect-trigger.outputs.provider }}
+          FALLBACK_PROVIDER: ${{ vars.OPENCODE_PROVIDER || 'azure-foundry' }}
+          FALLBACK_MODEL_ID: ${{ vars.OPENCODE_MODEL_ID || vars.MODEL_ID || vars.modelid || vars.model || 'gpt-5.3-codex' }}
+          OPENCODE_BASE_URL_INPUT: ${{ vars.OPENCODE_BASE_URL || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}
+          OPENCODE_API_VERSION_INPUT: ${{ vars.OPENCODE_API_VERSION || '' }}
+          OPENCODE_ALLOW_NON_AZURE_BASE_URL: ${{ vars.OPENCODE_ALLOW_NON_AZURE_BASE_URL || '' }}
         run: |
           set -euo pipefail
 
-          DELIM="OPENCODE_PROMPT_EOF_$(date +%s%N)"
+          echo "::group::OpenCode environment setup"
 
-          {
-            echo "prompt<<$DELIM"
+          trim() {
+            local value="${1:-}"
+            value="${value#"${value%%[![:space:]]*}"}"
+            value="${value%"${value##*[![:space:]]}"}"
+            printf '%s' "$value"
+          }
 
-            echo "CONTEXTO:"
-            echo "event_name=${EVENT_NAME}"
-            echo ""
+          first_non_empty() {
+            local value=""
+            for value in "$@"; do
+              if [[ -n "${value:-}" ]]; then
+                printf '%s' "$value"
+                return 0
+              fi
+            done
+            return 1
+          }
 
-            if [[ -n "${EXECUTION_METADATA:-}" ]]; then
-              echo "execution_metadata: ${EXECUTION_METADATA}"
-              echo ""
-            fi
+          normalize_provider() {
+            local input="${1:-}"
+            local normalized="${input,,}"
+            normalized="${normalized//[[:space:]]/}"
+            printf '%s' "$normalized"
+          }
 
-            if [[ -n "$COMMENT_BODY" ]]; then
-              echo "=== COMENTARIO ==="
-              echo "$COMMENT_BODY"
-              echo ""
-            fi
+          is_truthy() {
+            local value="${1:-}"
+            case "${value,,}" in
+              1|true|yes|y|on) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
 
-            if [[ -n "$ISSUE_TITLE" || -n "$ISSUE_BODY" ]]; then
-              echo "=== ISSUE ==="
-              echo "title: $ISSUE_TITLE"
-              echo "body:"
-              echo "$ISSUE_BODY"
-              echo ""
-            fi
+          is_allowed_azure_host() {
+            local host="${1,,}"
+            case "$host" in
+              openai.azure.com|*.openai.azure.com|services.ai.azure.com|*.services.ai.azure.com)
+                return 0
+                ;;
+              *)
+                return 1
+                ;;
+            esac
+          }
 
-            if [[ -n "$PR_TITLE" || -n "$PR_BODY" ]]; then
-              echo "=== PULL REQUEST ==="
-              echo "title: $PR_TITLE"
-              echo "body:"
-              echo "$PR_BODY"
-              echo ""
-            fi
-
-            echo "$DELIM"
-
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Install OCX
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          curl -fsSL https://ocx.kdco.dev/install.sh | sh
-
-          mkdir -p ~/.config
-
-        
-      - name: Export vars
-        run: |
-          CURRENT_DIR="$(pwd)"
-          CONFIG_FILE="$CURRENT_DIR/.opencode/opencode.jsonc"
-
-          if [ ! -f "$CONFIG_FILE" ]; then
-             echo "Config file not found: $CONFIG_FILE"
-             exit 1
+          RESOLVED_BASE_URL="$(trim "${OPENCODE_BASE_URL_INPUT:-}")"
+          if ! RESOLVED_BASE_URL_HOST="$(node -e 'const value = process.argv[1]; if (!value || !value.trim()) { console.error("base_url is empty"); process.exit(1); } let parsed; try { parsed = new URL(value); } catch { console.error("base_url is not a valid URL"); process.exit(1); } if (parsed.protocol !== "https:") { console.error(`base_url must use https (received ${parsed.protocol || "unknown"})`); process.exit(1); } process.stdout.write(parsed.hostname.toLowerCase());' "$RESOLVED_BASE_URL")"
+          then
+            echo "::error title=OpenCode::Invalid OPENCODE_BASE_URL '$RESOLVED_BASE_URL'"
+            exit 1
           fi
 
+          ALLOW_NON_AZURE_BASE_URL_RAW="$(trim "${OPENCODE_ALLOW_NON_AZURE_BASE_URL:-}")"
+          BASE_URL_TRUSTED="false"
+          BASE_URL_TRUST_MODE="azure-allowlist"
+
+          if is_allowed_azure_host "$RESOLVED_BASE_URL_HOST"; then
+            BASE_URL_TRUSTED="true"
+          elif is_truthy "$ALLOW_NON_AZURE_BASE_URL_RAW"; then
+            BASE_URL_TRUSTED="true"
+            BASE_URL_TRUST_MODE="override-non-azure"
+            echo "::warning title=OpenCode::Using non-Azure base_url host '$RESOLVED_BASE_URL_HOST' because OPENCODE_ALLOW_NON_AZURE_BASE_URL=true. API key will be sent to this host."
+          else
+            echo "::error title=OpenCode::base_url host '$RESOLVED_BASE_URL_HOST' is not allowed. Allowed hosts: *.openai.azure.com, *.services.ai.azure.com. Set OPENCODE_ALLOW_NON_AZURE_BASE_URL=true only for trusted non-Azure endpoints."
+            exit 1
+          fi
+
+          RAW_DETECTED_PROVIDER="$(trim "${DETECTED_PROVIDER:-}")"
+          RAW_DETECTED_MODEL="$(trim "${DETECTED_MODEL:-}")"
+
+          RESOLVED_PROVIDER="$(first_non_empty "$RAW_DETECTED_PROVIDER" "$FALLBACK_PROVIDER" "azure-foundry")"
+          RESOLVED_PROVIDER="$(normalize_provider "$RESOLVED_PROVIDER")"
+          if [[ -z "$RESOLVED_PROVIDER" ]]; then
+            echo "::error title=OpenCode::Resolved provider is empty"
+            exit 1
+          fi
+
+          if [[ "$RAW_DETECTED_MODEL" == */* ]]; then
+            MODEL_PROVIDER_FROM_MODEL="$(normalize_provider "${RAW_DETECTED_MODEL%%/*}")"
+            RESOLVED_MODEL_ID="${RAW_DETECTED_MODEL#*/}"
+            if [[ -n "$MODEL_PROVIDER_FROM_MODEL" && "$MODEL_PROVIDER_FROM_MODEL" != "$RESOLVED_PROVIDER" ]]; then
+              echo "::notice title=OpenCode::Aligning runtime provider '$RESOLVED_PROVIDER' -> '$MODEL_PROVIDER_FROM_MODEL' from detected model '$RAW_DETECTED_MODEL'."
+              RESOLVED_PROVIDER="$MODEL_PROVIDER_FROM_MODEL"
+            fi
+          elif [[ -n "$RAW_DETECTED_MODEL" ]]; then
+            RESOLVED_MODEL_ID="$RAW_DETECTED_MODEL"
+          else
+            RESOLVED_MODEL_ID="$FALLBACK_MODEL_ID"
+          fi
+
+          RESOLVED_MODEL_ID="$(trim "$RESOLVED_MODEL_ID")"
+          if [[ -z "${RESOLVED_MODEL_ID//[[:space:]]/}" ]]; then
+            echo "::error title=OpenCode::Resolved model id is empty"
+            exit 1
+          fi
+
+          RESOLVED_FULL_MODEL="${RESOLVED_PROVIDER}/${RESOLVED_MODEL_ID}"
+
+          {
+            echo "OPENCODE_BASE_URL=$RESOLVED_BASE_URL"
+            echo "OPENCODE_BASE_URL_HOST=$RESOLVED_BASE_URL_HOST"
+            echo "OPENCODE_BASE_URL_TRUSTED=$BASE_URL_TRUSTED"
+            echo "OPENCODE_BASE_URL_TRUST_MODE=$BASE_URL_TRUST_MODE"
+            echo "OPENCODE_API_VERSION=$(trim "${OPENCODE_API_VERSION_INPUT:-}")"
+            echo "OPENCODE_PROVIDER=$RESOLVED_PROVIDER"
+            echo "OPENCODE_MODEL_ID=$RESOLVED_MODEL_ID"
+            echo "OPENCODE_MODEL=$RESOLVED_FULL_MODEL"
+          } >> "$GITHUB_ENV"
+
+          {
+            echo "model=$RESOLVED_FULL_MODEL"
+            echo "provider=$RESOLVED_PROVIDER"
+            echo "model_id=$RESOLVED_MODEL_ID"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "::notice title=OpenCode::Resolved runtime (provider='$RESOLVED_PROVIDER', model='$RESOLVED_FULL_MODEL', base_url_host='$RESOLVED_BASE_URL_HOST', trust_mode='$BASE_URL_TRUST_MODE')"
+          {
+            echo "## OpenCode runtime config"
+            echo "- provider: \`$RESOLVED_PROVIDER\`"
+            echo "- model: \`$RESOLVED_FULL_MODEL\`"
+            echo "- base_url host: \`$RESOLVED_BASE_URL_HOST\`"
+            echo "- base_url trust mode: \`$BASE_URL_TRUST_MODE\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::endgroup::"
+
+      - name: Export OpenCode config vars
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::group::OpenCode config"
+          CURRENT_DIR="$(pwd)"
+          CONFIG_FILE="$CURRENT_DIR/.opencode/opencode.jsonc"
+          if [[ ! -f "$CONFIG_FILE" ]]; then
+            echo "::error::Config file not found: $CONFIG_FILE"
+            exit 1
+          fi
           echo "OPENCODE_CONFIG=$CONFIG_FILE" >> "$GITHUB_ENV"
           echo "OPENCODE_CONFIG_DIR=$CURRENT_DIR/.opencode" >> "$GITHUB_ENV"
-    
-      - name: Run OpenCode Review
-        uses: sst/opencode/github@latest
+          echo "::notice title=OpenCode::Using config '$CONFIG_FILE'"
+          echo "::endgroup::"
+
+      - name: Guard OpenCode base_url trust before secrets export
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${OPENCODE_BASE_URL_TRUSTED:-false}" != "true" ]]; then
+            echo "::error title=OpenCode::Refusing to continue because OPENCODE_BASE_URL trust check failed."
+            exit 1
+          fi
+          echo "::notice title=OpenCode::base_url host '${OPENCODE_BASE_URL_HOST:-unknown}' approved (trust_mode='${OPENCODE_BASE_URL_TRUST_MODE:-unknown}')."
+
+      - name: Run OpenCode
+        uses: sst/opencode/github@v0
         env:
-          AZURE_OPENAI_API_KEY: ${{ env.AZURE_OPENAI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OPENCODE_CONFIG: ${{ env.OPENCODE_CONFIG }}
           OPENCODE_CONFIG_DIR: ${{ env.OPENCODE_CONFIG_DIR }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          AZURE_RESOURCE_NAME: "openslab-resource"
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY || secrets.AZURE_API_KEY || secrets.API_KEY || secrets.apiKey }}
+          OPENCODE_BASE_URL: ${{ env.OPENCODE_BASE_URL }}
+          OPENCODE_API_VERSION: ${{ env.OPENCODE_API_VERSION }}
+          OPENCODE_PROVIDER: ${{ env.OPENCODE_PROVIDER }}
+          OPENCODE_MODEL_ID: ${{ env.OPENCODE_MODEL_ID }}
+          AZURE_OPENAI_API_KEY: ${{ secrets.OPENCODE_API_KEY || secrets.AZURE_API_KEY || secrets.API_KEY || secrets.apiKey }}
+          AZURE_API_KEY: ${{ secrets.OPENCODE_API_KEY || secrets.AZURE_API_KEY || secrets.API_KEY || secrets.apiKey }}
+          API_KEY: ${{ secrets.OPENCODE_API_KEY || secrets.AZURE_API_KEY || secrets.API_KEY || secrets.apiKey }}
+          apiKey: ${{ secrets.OPENCODE_API_KEY || secrets.AZURE_API_KEY || secrets.API_KEY || secrets.apiKey }}
+          BASEURL: ${{ env.OPENCODE_BASE_URL }}
+          baseurl: ${{ env.OPENCODE_BASE_URL }}
+          MODEL_ID: ${{ env.OPENCODE_MODEL_ID }}
+          modelid: ${{ env.OPENCODE_MODEL_ID }}
+          model: ${{ env.OPENCODE_MODEL_ID }}
+          OPENCODE_RUN_KIND: ${{ needs.detect-trigger.outputs.run_kind }}
         with:
-          model: ${{ needs.detect-trigger.outputs.model }}
-          agent: build
-          share: false
-          prompt: ${{ steps.compose.outputs.prompt }}
+          model: ${{ steps.provider-env.outputs.model }}
+          agent: ${{ needs.detect-trigger.outputs.agent != '' && needs.detect-trigger.outputs.agent || null }}
+          variant: ${{ needs.detect-trigger.outputs.variant != '' && needs.detect-trigger.outputs.variant || null }}
+          share: ${{ needs.detect-trigger.outputs.share != '' && needs.detect-trigger.outputs.share || null }}
+          prompt: ${{ needs.detect-trigger.outputs.prompt }}
 
       - name: Report failure
         if: failure()
-
         uses: actions/github-script@v7
-
         env:
           PR_NUMBER: ${{ needs.detect-trigger.outputs.pr_number }}
           ISSUE_NUMBER: ${{ needs.detect-trigger.outputs.issue_number }}
           RUN_KIND: ${{ needs.detect-trigger.outputs.run_kind }}
-
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-
           script: |
             const issueNumber =
               process.env.RUN_KIND === 'issue_task'

@@ -45,6 +45,7 @@ import {
  *   For the full endpoint: https://{resource}.services.ai.azure.com/anthropic/v1/messages
  * - ANTHROPIC_FOUNDRY_BASE_URL: Optional. Alternative to resource - provide full base URL directly
  *   (e.g., 'https://my-resource.services.ai.azure.com')
+ * - ANTHROPIC_FOUNDRY_API_VERSION: Optional. Reserved for SDK/runtime compatibility
  *
  * Authentication (one of the following):
  * - ANTHROPIC_FOUNDRY_API_KEY: Your Microsoft Foundry API key (if using API key auth)

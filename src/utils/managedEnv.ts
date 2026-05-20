@@ -7,12 +7,14 @@ import {
   SAFE_ENV_VARS,
 } from './managedEnvConstants.js'
 import { clearMTLSCache } from './mtls.js'
+import { getFoundryProfileEnv } from './foundryProfiles.js'
 import { clearProxyCache, configureGlobalAgents } from './proxy.js'
 import { isSettingSourceEnabled } from './settings/constants.js'
 import {
   getSettings_DEPRECATED,
   getSettingsForSource,
 } from './settings/settings.js'
+import type { SettingsJson } from './settings/types.js'
 
 /**
  * `claude ssh` remote: ANTHROPIC_UNIX_SOCKET routes auth through a -R forwarded
@@ -90,6 +92,16 @@ function filterSettingsEnv(
   )
 }
 
+function getSettingsDerivedEnv(
+  settings: SettingsJson | undefined,
+): Record<string, string> {
+  if (!settings) return {}
+  return {
+    ...(settings.env ?? {}),
+    ...getFoundryProfileEnv(settings),
+  }
+}
+
 /**
  * Trusted setting sources whose env vars can be applied before the trust dialog.
  *
@@ -142,9 +154,10 @@ export function applySafeConfigEnvironmentVariables(): void {
   for (const source of TRUSTED_SETTING_SOURCES) {
     if (source === 'policySettings') continue
     if (!isSettingSourceEnabled(source)) continue
+    const settings = getSettingsForSource(source)
     Object.assign(
       process.env,
-      filterSettingsEnv(getSettingsForSource(source)?.env),
+      filterSettingsEnv(getSettingsDerivedEnv(settings)),
     )
   }
 
@@ -158,7 +171,7 @@ export function applySafeConfigEnvironmentVariables(): void {
 
   Object.assign(
     process.env,
-    filterSettingsEnv(getSettingsForSource('policySettings')?.env),
+    filterSettingsEnv(getSettingsDerivedEnv(getSettingsForSource('policySettings'))),
   )
 
   // Apply only safe env vars from the fully-merged settings (which includes
@@ -169,7 +182,9 @@ export function applySafeConfigEnvironmentVariables(): void {
   // unchanged (it has the highest merge priority in both loops) — except
   // provider-routing vars, which filterSettingsEnv strips from every source
   // when CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST is set.
-  const settingsEnv = filterSettingsEnv(getSettings_DEPRECATED()?.env)
+  const settingsEnv = filterSettingsEnv(
+    getSettingsDerivedEnv(getSettings_DEPRECATED() ?? undefined),
+  )
   for (const [key, value] of Object.entries(settingsEnv)) {
     if (SAFE_ENV_VARS.has(key.toUpperCase())) {
       process.env[key] = value
@@ -187,7 +202,10 @@ export function applySafeConfigEnvironmentVariables(): void {
 export function applyConfigEnvironmentVariables(): void {
   Object.assign(process.env, filterSettingsEnv(getGlobalConfig().env))
 
-  Object.assign(process.env, filterSettingsEnv(getSettings_DEPRECATED()?.env))
+  Object.assign(
+    process.env,
+    filterSettingsEnv(getSettingsDerivedEnv(getSettings_DEPRECATED() ?? undefined)),
+  )
 
   // Clear caches so agents are rebuilt with the new env vars
   clearCACertsCache()

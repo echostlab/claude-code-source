@@ -7,6 +7,7 @@ import { getAccountInformation, isClaudeAISubscriber } from './auth.js';
 import { getLargeMemoryFiles, getMemoryFiles, MAX_MEMORY_CHARACTER_COUNT } from './claudemd.js';
 import { getDoctorDiagnostic } from './doctorDiagnostic.js';
 import { getAWSRegion, getDefaultVertexRegion, isEnvTruthy } from './envUtils.js';
+import { getActiveFoundryProfile } from './foundryProfiles.js';
 import { getDisplayPath } from './file.js';
 import { formatNumber } from './format.js';
 import { getIdeClientName, type IDEExtensionInstallationStatus, isJetBrainsIde, toIDEDisplayName } from './ide.js';
@@ -301,6 +302,13 @@ export function buildAPIProviderProperties(): Property[] {
       });
     }
   } else if (apiProvider === 'foundry') {
+    const activeFoundryProfile = getActiveFoundryProfile(getSettingsForSource('userSettings') ?? undefined);
+    if (activeFoundryProfile) {
+      properties.push({
+        label: 'Microsoft Foundry profile',
+        value: activeFoundryProfile.name
+      });
+    }
     const foundryBaseUrl = process.env.ANTHROPIC_FOUNDRY_BASE_URL;
     if (foundryBaseUrl) {
       properties.push({
