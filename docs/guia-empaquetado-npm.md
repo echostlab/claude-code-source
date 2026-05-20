@@ -7,6 +7,11 @@
 
 > Este paquete se publica con npm, pero tanto la compilación como la ejecución del binario dependen de Bun.
 
+Nombre/binario del paquete en este repo:
+
+- paquete npm: `claude-code-source`
+- ejecutable: `claude-code-source`
+
 ## 1) Instalar dependencias
 
 ```bash
@@ -49,6 +54,12 @@ También puedes usar:
 
 ```bash
 npm pack --dry-run
+```
+
+Si estás en un entorno sin Bun y solo quieres inspeccionar el contenido del tarball sin ejecutar `prepack`:
+
+```bash
+npm pack --dry-run --ignore-scripts
 ```
 
 ## 5) Generar el `.tgz` local

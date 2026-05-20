@@ -2,6 +2,7 @@
   "name": "claude-code-source",
   "version": "0.1.0",
   "description": "Empaquetado npm del código fuente de Claude Code con build usando Bun.",
+  "private": false,
   "author": "echostlab",
   "keywords": [
     "claude-code",
@@ -20,6 +21,10 @@
   "license": "SEE LICENSE IN LICENSE.md",
   "type": "module",
   "main": "./dist/cli.js",
+  "exports": {
+    ".": "./dist/cli.js"
+  },
+  "preferGlobal": true,
   "bin": {
     "claude-code-source": "./bin/claude-code-source"
   },
@@ -27,10 +32,12 @@
     "dist/",
     "bin/",
     "scripts/",
+    "docs/guia-empaquetado-npm.md",
     "README.md",
     "LICENSE.md"
   ],
   "engines": {
+    "node": ">=18",
     "bun": ">=1.2.0"
   },
   "scripts": {

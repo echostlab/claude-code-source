@@ -1,45 +1,33 @@
-> **Disclaimer:** This repository contains source code recovered from the source map (`cli.js.map`) bundled in the [`@anthropic-ai/claude-code@2.1.88`](https://www.npmjs.com/package/@anthropic-ai/claude-code/v/2.1.88) npm package. It is not an official source release by Anthropic. All rights belong to their respective owners.
+> **Disclaimer:** Este repositorio contiene código reconstruido desde un source map (`cli.js.map`) incluido en un paquete npm de terceros. **No** es una publicación oficial de Anthropic.
 
-# Claude Code
+# claude-code-source
 
-![](https://img.shields.io/badge/Node.js-18%2B-brightgreen?style=flat-square) [![npm]](https://www.npmjs.com/package/@anthropic-ai/claude-code)
+![](https://img.shields.io/badge/Node.js-18%2B-brightgreen?style=flat-square) ![](https://img.shields.io/badge/Bun-%3E%3D1.2.0-black?style=flat-square)
 
-[npm]: https://img.shields.io/npm/v/@anthropic-ai/claude-code.svg?style=flat-square
+Fork orientado a empaquetar este código como paquete npm con nombre **`claude-code-source`** y binario **`claude-code-source`**.
 
-Claude Code is an agentic coding tool that lives in your terminal, understands your codebase, and helps you code faster by executing routine tasks, explaining complex code, and handling git workflows -- all through natural language commands. Use it in your terminal, IDE, or tag @claude on Github.
-
-**Learn more at [Claude Code Homepage](https://claude.com/product/claude-code)** | [Documentation](https://code.claude.com/docs/en/overview)
-
-<img src="https://github.com/anthropics/claude-code/blob/main/demo.gif?raw=1" />
-
-## Get started
-
-1. Install Claude Code:
+## Instalación (este paquete)
 
 ```sh
-npm install -g @anthropic-ai/claude-code
+npm install -g claude-code-source
 ```
 
-2. Navigate to your project directory and run `claude`.
+Ejecutar:
 
-## Reporting Bugs
+```sh
+claude-code-source
+```
 
-We welcome your feedback. Use the `/bug` command to report issues directly within Claude Code, or file a [GitHub issue](https://github.com/anthropics/claude-code/issues).
+## Nota importante sobre runtime/build
 
-## Connect on Discord
+Este fork depende de **Bun** para:
 
-Join the [Claude Developers Discord](https://anthropic.com/discord) to connect with other developers using Claude Code. Get help, share feedback, and discuss your projects with the community.
+- compilar (`npm run build`)
+- empaquetar vía `prepack` (`npm pack`, `npm publish`)
+- ejecutar el binario publicado (`claude-code-source`)
 
-## Data collection, usage, and retention
+## Compilar y empaquetar
 
-When you use Claude Code, we collect feedback, which includes usage data (such as code acceptance or rejections), associated conversation data, and user feedback submitted via the `/bug` command.
+Guía paso a paso:
 
-### How we use your data
-
-See our [data usage policies](https://code.claude.com/docs/en/data-usage).
-
-### Privacy safeguards
-
-We have implemented several safeguards to protect your data, including limited retention periods for sensitive information and restricted access to user session data.
-
-For full details, please review our [Commercial Terms of Service](https://www.anthropic.com/legal/commercial-terms) and [Privacy Policy](https://www.anthropic.com/legal/privacy).
+- [Guía de compilación y empaquetado npm](./docs/guia-empaquetado-npm.md)
