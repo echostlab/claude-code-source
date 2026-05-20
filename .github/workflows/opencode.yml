@@ -280,6 +280,10 @@ jobs:
       - name: Install repo dependencies (optional)
         run: sudo npm install -g --no-audit --no-fund 
 
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
       - name: Set Azure OpenAI env vars
         shell: bash
         run: |
@@ -354,6 +358,8 @@ jobs:
           curl -fsSL https://ocx.kdco.dev/install.sh | sh
 
           mkdir -p ~/.config
+
+          cp .opencode/opencode.jsonc .
         
       - name: Export vars
         run: |
