@@ -18,9 +18,8 @@
                   "output":128000
                },
                "options":{
-                  "reasoningEffort":"medium",
-                  "textVerbosity":"low",
-                  "parallelToolCalls":true
+                  "reasoningEffort":"xhight",
+                  "textVerbosity":"low"
                }
             }
          }
@@ -32,7 +31,7 @@
       "plan":{
          "model":"azure-foundry/gpt-5.3-codex",
          "temperature":0.3,
-         "reasoningEffort":"medium",
+         "reasoningEffort":"xhight",
          "permission":{
             "edit":"deny",
             "write":"deny",
@@ -49,7 +48,7 @@
       "build":{
          "model":"azure-foundry/gpt-5.3-codex",
          "temperature":0.3,
-         "reasoningEffort":"medium",
+         "reasoningEffort":"xhight",
          "prompt":"You are a **build orchestrator**. You coordinate implementation through delegation - you do NOT implement directly.\\n\\n## Your Role\\n- Delegate implementation to `coder`\\n- Delegate documentation to `scribe`\\n- Delegate codebase analysis to `explore`\\n- Delegate external research to `researcher`\\n- Interpret results and decide next steps\\n\\n## Critical Constraint\\nYou CANNOT edit files or run commands directly. For ALL implementation and verification, delegate to `coder`.",
          "permission":{
             "edit":"deny",
@@ -58,8 +57,6 @@
                "*":"deny"
             },
             "delegate":"allow",
-            "delegation_read":"allow",
-            "delegation_list":"allow",
             "task":"allow",
             "worktree_*":"allow"
          }
@@ -67,13 +64,14 @@
       "coder":{
          "model":"azure-foundry/gpt-5.3-codex",
          "temperature":0.2,
-         "reasoningEffort":"low",
+         "reasoningEffort":"xhight",
          "permission":{
             "context7_*":"deny",
             "exa_*":"deny",
             "gh_grep_*":"deny",
             "read":"allow",
             "write":"allow",
+            "create":"allow",
             "edit":"allow",
             "glob":"allow",
             "grep":"allow",
@@ -85,7 +83,7 @@
       "explore":{
          "model":"azure-foundry/gpt-5.3-codex",
          "temperature":0.2,
-         "reasoningEffort":"low",
+         "reasoningEffort":"xhight",
          "permission":{
             "edit":"deny",
             "write":"deny",
@@ -123,7 +121,7 @@
       "researcher":{
          "model":"azure-foundry/gpt-5.3-codex",
          "temperature":0.4,
-         "reasoningEffort":"low",
+         "reasoningEffort":"xhight",
          "permission":{
             "context7_*":"allow",
             "exa_*":"allow",
@@ -179,7 +177,7 @@
       "scribe":{
          "model":"azure-foundry/gpt-5.3-codex",
          "temperature":1,
-         "reasoningEffort":"low",
+         "reasoningEffort":"xhight",
          "permission":{
             "bash":{
                "*":"deny"
@@ -195,7 +193,7 @@
       "reviewer":{
          "model":"azure-foundry/gpt-5.3-codex",
          "temperature":0.1,
-         "reasoningEffort":"low",
+         "reasoningEffort":"xhight",
          "permission":{
             "edit":"deny",
             "write":"deny",
@@ -207,9 +205,7 @@
                "git blame*":"allow",
                "rg *":"allow"
             },
-            "plan_read":"allow",
-            "delegation_read":"allow",
-            "delegation_list":"allow"
+            "plan_read":"allow"
          }
       }
    },
