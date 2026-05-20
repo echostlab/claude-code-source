@@ -248,11 +248,9 @@ jobs:
       CLAUDECODE_ALLOW_NON_AZURE_BASE_URL: ${{ vars.CLAUDECODE_ALLOW_NON_AZURE_BASE_URL || '' }}
 
       provider: ${{ vars.CLAUDECODE_PROVIDER || vars.OPENCODE_PROVIDER || vars.PROVIDER || vars.provider || 'azure-foundry' }}
-      PROVIDER: ${{ vars.CLAUDECODE_PROVIDER || vars.OPENCODE_PROVIDER || vars.PROVIDER || vars.provider || 'azure-foundry' }}
       CLAUDECODE_PROVIDER: ${{ vars.CLAUDECODE_PROVIDER || vars.OPENCODE_PROVIDER || vars.PROVIDER || vars.provider || 'azure-foundry' }}
 
       baseurl: ${{ vars.CLAUDECODE_BASE_URL || vars.OPENCODE_BASE_URL || vars.AZURE_OPENAI_ENDPOINT || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}
-      BASEURL: ${{ vars.CLAUDECODE_BASE_URL || vars.OPENCODE_BASE_URL || vars.AZURE_OPENAI_ENDPOINT || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}
       CLAUDECODE_BASE_URL: ${{ vars.CLAUDECODE_BASE_URL || vars.OPENCODE_BASE_URL || vars.AZURE_OPENAI_ENDPOINT || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}
       AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT || '' }}
 
@@ -747,11 +745,9 @@ jobs:
       CLAUDECODE_ALLOW_NON_AZURE_BASE_URL: ${{ vars.CLAUDECODE_ALLOW_NON_AZURE_BASE_URL || '' }}
 
       provider: ${{ vars.CLAUDECODE_PROVIDER || vars.OPENCODE_PROVIDER || vars.PROVIDER || vars.provider || 'azure-foundry' }}
-      PROVIDER: ${{ vars.CLAUDECODE_PROVIDER || vars.OPENCODE_PROVIDER || vars.PROVIDER || vars.provider || 'azure-foundry' }}
       CLAUDECODE_PROVIDER: ${{ vars.CLAUDECODE_PROVIDER || vars.OPENCODE_PROVIDER || vars.PROVIDER || vars.provider || 'azure-foundry' }}
 
       baseurl: ${{ vars.CLAUDECODE_BASE_URL || vars.OPENCODE_BASE_URL || vars.AZURE_OPENAI_ENDPOINT || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}
-      BASEURL: ${{ vars.CLAUDECODE_BASE_URL || vars.OPENCODE_BASE_URL || vars.AZURE_OPENAI_ENDPOINT || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}
       CLAUDECODE_BASE_URL: ${{ vars.CLAUDECODE_BASE_URL || vars.OPENCODE_BASE_URL || vars.AZURE_OPENAI_ENDPOINT || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}
       AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT || '' }}
 
