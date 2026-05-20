@@ -359,7 +359,6 @@ jobs:
 
           mkdir -p ~/.config
 
-          cp .opencode/opencode.jsonc .
         
       - name: Export vars
         run: |
