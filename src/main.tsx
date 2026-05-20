@@ -585,6 +585,14 @@ const _pendingSSH: PendingSSH | undefined = feature('SSH_REMOTE') ? {
 export async function main() {
   profileCheckpoint('main_function_start');
 
+  if (isEnvTruthy(process.env.GITHUB_ACTIONS)) {
+    const eventName = process.env.GITHUB_EVENT_NAME || 'unknown';
+    const runKind = process.env.OPENCODE_RUN_KIND || 'unspecified';
+    writeToStderr('::group::OpenCode runtime\n');
+    writeToStderr(`::notice title=OpenCode::Starting CLI runtime (event=${eventName}, run_kind=${runKind})\n`);
+    writeToStderr('::endgroup::\n');
+  }
+
   // SECURITY: Prevent Windows from executing commands from current directory
   // This must be set before ANY command execution to prevent PATH hijacking attacks
   // See: https://docs.microsoft.com/en-us/windows/win32/api/processenv/nf-processenv-searchpathw
