@@ -50,3 +50,30 @@ Variables mínimas recomendadas para GitHub Actions:
   - `OPENCODE_API_VERSION`, `API_VERSION`, `APIVERSION`, `apiVersion`
 
 El workflow usa `GITHUB_TOKEN` con permisos explícitos mínimos para crear rama/commit/PR y comentar en issues.
+
+## CI + Azure models
+
+`claudecode` soporta selección por `workflow_dispatch` con inputs opcionales: `provider`, `model_id`, `base_url`, `api_version` (además de `prompt`).
+
+> Alcance real de `provider` en este workflow: **solo Azure Foundry**.
+> Aliases aceptados: `azure`, `azure-foundry`, `azure-openai`, `foundry` (todos se normalizan a `azure-foundry`).
+> Cualquier otro valor falla con error.
+
+Aliases Azure soportados en CI (además de los actuales):
+
+- Endpoint: `AZURE_OPENAI_ENDPOINT`
+- Deployment/model id: `AZURE_OPENAI_DEPLOYMENT`
+- API version: `AZURE_OPENAI_API_VERSION`
+
+Seguridad de `base_url` en CI:
+
+- Se exige URL válida con `https`.
+- Host allowlist por defecto: `*.openai.azure.com` y `*.services.ai.azure.com`.
+- Para endpoints no estándar, se requiere override explícito: `CLAUDECODE_ALLOW_NON_AZURE_BASE_URL=true` (usar solo en endpoints de confianza).
+
+Ejemplos de `model_id` en Azure:
+
+- GPT: `gpt-4.1` (o tu deployment equivalente)
+- DeepSeek: `deepseek-r1` (o tu deployment equivalente)
+
+También acepta formato con prefijo (`azure-foundry/deepseek-r1`) y CI lo normaliza para exportar `ANTHROPIC_MODEL=deepseek-r1`.

@@ -56,7 +56,7 @@ jobs:
           TRUSTED_AUTHOR_ASSOCIATIONS: OWNER,MEMBER,COLLABORATOR
           ALLOWED_SLASH_ACTORS: ${{ vars.OPENCODE_ALLOWED_SLASH_ACTORS || '' }}
           ALLOWED_AGENT_OVERRIDES: build,plan,reviewer
-          ALLOWED_VARIANT_OVERRIDES: default
+          ALLOWED_VARIANT_OVERRIDES: ${{ vars.OPENCODE_ALLOWED_VARIANT_OVERRIDES || 'default,xhigh' }}
           DEFAULT_PROVIDER: ${{ vars.OPENCODE_PROVIDER || 'azure-foundry' }}
           DEFAULT_MODEL_ID: ${{ vars.OPENCODE_MODEL_ID || vars.MODEL_ID || vars.modelid || vars.model || 'gpt-5.3-codex' }}
         run: |
@@ -85,6 +85,19 @@ jobs:
 
           extract_provider() {
             echo "${1%%/*}"
+          }
+
+          normalize_provider() {
+            local input="${1:-}"
+            local normalized="${input,,}"
+            normalized="${normalized//[[:space:]]/}"
+
+            if [[ -z "$normalized" ]]; then
+              normalized="${DEFAULT_PROVIDER:-azure-foundry}"
+              normalized="${normalized,,}"
+            fi
+
+            echo "$normalized"
           }
 
           extract_flag() {
@@ -154,8 +167,14 @@ jobs:
           validate_variant() {
             local input="${1:-}"
             local normalized="${input,,}"
+
+            if [[ "$normalized" == "xhight" ]]; then
+              echo "::notice::Normalizing legacy variant value 'xhight' to 'xhigh'."
+              normalized="xhigh"
+            fi
+
             if ! csv_contains "$ALLOWED_VARIANT_OVERRIDES" "$normalized"; then
-              fail_invalid_flag "variant" "value '$input' is not allowlisted (allowed: ${ALLOWED_VARIANT_OVERRIDES})"
+              fail_invalid_flag "variant" "value '$input' (normalized: '$normalized') is not allowlisted (allowed: ${ALLOWED_VARIANT_OVERRIDES})"
             fi
             echo "$normalized"
           }
@@ -289,7 +308,7 @@ jobs:
             echo "pr_number=$PR_NUMBER"
             echo "issue_number=$ISSUE_NUMBER"
             echo "model=$FULL_MODEL"
-            echo "provider=$(extract_provider "$FULL_MODEL")"
+            echo "provider=$(normalize_provider "$(extract_provider "$FULL_MODEL")")"
             echo "agent=$SELECTED_AGENT"
             echo "variant=$SELECTED_VARIANT"
             echo "share=$SELECTED_SHARE"
@@ -305,6 +324,7 @@ jobs:
             echo "- should_run: \\`$SHOULD_RUN\\`"
             echo "- run_kind: \\`$RUN_KIND\\`"
             echo "- model: \\`$FULL_MODEL\\`"
+            echo "- provider: \\`$(normalize_provider "$(extract_provider "$FULL_MODEL")")\\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
           echo "::endgroup::"
@@ -348,23 +368,144 @@ jobs:
           echo "::endgroup::"
 
       - name: Set OpenCode provider env vars
+        id: provider-env
         shell: bash
+        env:
+          DETECTED_MODEL: ${{ needs.detect-trigger.outputs.model }}
+          DETECTED_PROVIDER: ${{ needs.detect-trigger.outputs.provider }}
+          FALLBACK_PROVIDER: ${{ vars.OPENCODE_PROVIDER || 'azure-foundry' }}
+          FALLBACK_MODEL_ID: ${{ vars.OPENCODE_MODEL_ID || vars.MODEL_ID || vars.modelid || vars.model || 'gpt-5.3-codex' }}
+          OPENCODE_BASE_URL_INPUT: ${{ vars.OPENCODE_BASE_URL || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}
+          OPENCODE_API_VERSION_INPUT: ${{ vars.OPENCODE_API_VERSION || '' }}
+          OPENCODE_ALLOW_NON_AZURE_BASE_URL: ${{ vars.OPENCODE_ALLOW_NON_AZURE_BASE_URL || '' }}
         run: |
           set -euo pipefail
 
           echo "::group::OpenCode environment setup"
 
-          RESOLVED_BASE_URL="${{ vars.OPENCODE_BASE_URL || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}"
-          RESOLVED_MODEL_ID="${{ vars.OPENCODE_MODEL_ID || vars.MODEL_ID || vars.modelid || vars.model || 'gpt-5.3-codex' }}"
+          trim() {
+            local value="${1:-}"
+            value="${value#"${value%%[![:space:]]*}"}"
+            value="${value%"${value##*[![:space:]]}"}"
+            printf '%s' "$value"
+          }
+
+          first_non_empty() {
+            local value=""
+            for value in "$@"; do
+              if [[ -n "${value:-}" ]]; then
+                printf '%s' "$value"
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          normalize_provider() {
+            local input="${1:-}"
+            local normalized="${input,,}"
+            normalized="${normalized//[[:space:]]/}"
+            printf '%s' "$normalized"
+          }
+
+          is_truthy() {
+            local value="${1:-}"
+            case "${value,,}" in
+              1|true|yes|y|on) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          is_allowed_azure_host() {
+            local host="${1,,}"
+            case "$host" in
+              openai.azure.com|*.openai.azure.com|services.ai.azure.com|*.services.ai.azure.com)
+                return 0
+                ;;
+              *)
+                return 1
+                ;;
+            esac
+          }
+
+          RESOLVED_BASE_URL="$(trim "${OPENCODE_BASE_URL_INPUT:-}")"
+          if ! RESOLVED_BASE_URL_HOST="$(node -e 'const value = process.argv[1]; if (!value || !value.trim()) { console.error("base_url is empty"); process.exit(1); } let parsed; try { parsed = new URL(value); } catch { console.error("base_url is not a valid URL"); process.exit(1); } if (parsed.protocol !== "https:") { console.error(`base_url must use https (received ${parsed.protocol || "unknown"})`); process.exit(1); } process.stdout.write(parsed.hostname.toLowerCase());' "$RESOLVED_BASE_URL")"
+          then
+            echo "::error title=OpenCode::Invalid OPENCODE_BASE_URL '$RESOLVED_BASE_URL'"
+            exit 1
+          fi
+
+          ALLOW_NON_AZURE_BASE_URL_RAW="$(trim "${OPENCODE_ALLOW_NON_AZURE_BASE_URL:-}")"
+          BASE_URL_TRUSTED="false"
+          BASE_URL_TRUST_MODE="azure-allowlist"
+
+          if is_allowed_azure_host "$RESOLVED_BASE_URL_HOST"; then
+            BASE_URL_TRUSTED="true"
+          elif is_truthy "$ALLOW_NON_AZURE_BASE_URL_RAW"; then
+            BASE_URL_TRUSTED="true"
+            BASE_URL_TRUST_MODE="override-non-azure"
+            echo "::warning title=OpenCode::Using non-Azure base_url host '$RESOLVED_BASE_URL_HOST' because OPENCODE_ALLOW_NON_AZURE_BASE_URL=true. API key will be sent to this host."
+          else
+            echo "::error title=OpenCode::base_url host '$RESOLVED_BASE_URL_HOST' is not allowed. Allowed hosts: *.openai.azure.com, *.services.ai.azure.com. Set OPENCODE_ALLOW_NON_AZURE_BASE_URL=true only for trusted non-Azure endpoints."
+            exit 1
+          fi
+
+          RAW_DETECTED_PROVIDER="$(trim "${DETECTED_PROVIDER:-}")"
+          RAW_DETECTED_MODEL="$(trim "${DETECTED_MODEL:-}")"
+
+          RESOLVED_PROVIDER="$(first_non_empty "$RAW_DETECTED_PROVIDER" "$FALLBACK_PROVIDER" "azure-foundry")"
+          RESOLVED_PROVIDER="$(normalize_provider "$RESOLVED_PROVIDER")"
+          if [[ -z "$RESOLVED_PROVIDER" ]]; then
+            echo "::error title=OpenCode::Resolved provider is empty"
+            exit 1
+          fi
+
+          if [[ "$RAW_DETECTED_MODEL" == */* ]]; then
+            MODEL_PROVIDER_FROM_MODEL="$(normalize_provider "${RAW_DETECTED_MODEL%%/*}")"
+            RESOLVED_MODEL_ID="${RAW_DETECTED_MODEL#*/}"
+            if [[ -n "$MODEL_PROVIDER_FROM_MODEL" && "$MODEL_PROVIDER_FROM_MODEL" != "$RESOLVED_PROVIDER" ]]; then
+              echo "::notice title=OpenCode::Aligning runtime provider '$RESOLVED_PROVIDER' -> '$MODEL_PROVIDER_FROM_MODEL' from detected model '$RAW_DETECTED_MODEL'."
+              RESOLVED_PROVIDER="$MODEL_PROVIDER_FROM_MODEL"
+            fi
+          elif [[ -n "$RAW_DETECTED_MODEL" ]]; then
+            RESOLVED_MODEL_ID="$RAW_DETECTED_MODEL"
+          else
+            RESOLVED_MODEL_ID="$FALLBACK_MODEL_ID"
+          fi
+
+          RESOLVED_MODEL_ID="$(trim "$RESOLVED_MODEL_ID")"
+          if [[ -z "${RESOLVED_MODEL_ID//[[:space:]]/}" ]]; then
+            echo "::error title=OpenCode::Resolved model id is empty"
+            exit 1
+          fi
+
+          RESOLVED_FULL_MODEL="${RESOLVED_PROVIDER}/${RESOLVED_MODEL_ID}"
 
           {
             echo "OPENCODE_BASE_URL=$RESOLVED_BASE_URL"
-            echo "OPENCODE_API_VERSION=${{ vars.OPENCODE_API_VERSION || '' }}"
-            echo "OPENCODE_PROVIDER=${{ vars.OPENCODE_PROVIDER || 'azure-foundry' }}"
+            echo "OPENCODE_BASE_URL_HOST=$RESOLVED_BASE_URL_HOST"
+            echo "OPENCODE_BASE_URL_TRUSTED=$BASE_URL_TRUSTED"
+            echo "OPENCODE_BASE_URL_TRUST_MODE=$BASE_URL_TRUST_MODE"
+            echo "OPENCODE_API_VERSION=$(trim "${OPENCODE_API_VERSION_INPUT:-}")"
+            echo "OPENCODE_PROVIDER=$RESOLVED_PROVIDER"
             echo "OPENCODE_MODEL_ID=$RESOLVED_MODEL_ID"
+            echo "OPENCODE_MODEL=$RESOLVED_FULL_MODEL"
           } >> "$GITHUB_ENV"
 
-          echo "::notice title=OpenCode::Resolved non-secret provider env vars exported"
+          {
+            echo "model=$RESOLVED_FULL_MODEL"
+            echo "provider=$RESOLVED_PROVIDER"
+            echo "model_id=$RESOLVED_MODEL_ID"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "::notice title=OpenCode::Resolved runtime (provider='$RESOLVED_PROVIDER', model='$RESOLVED_FULL_MODEL', base_url_host='$RESOLVED_BASE_URL_HOST', trust_mode='$BASE_URL_TRUST_MODE')"
+          {
+            echo "## OpenCode runtime config"
+            echo "- provider: \`$RESOLVED_PROVIDER\`"
+            echo "- model: \`$RESOLVED_FULL_MODEL\`"
+            echo "- base_url host: \`$RESOLVED_BASE_URL_HOST\`"
+            echo "- base_url trust mode: \`$BASE_URL_TRUST_MODE\`"
+          } >> "$GITHUB_STEP_SUMMARY"
           echo "::endgroup::"
 
       - name: Export OpenCode config vars
@@ -383,6 +524,16 @@ jobs:
           echo "::notice title=OpenCode::Using config '$CONFIG_FILE'"
           echo "::endgroup::"
 
+      - name: Guard OpenCode base_url trust before secrets export
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${OPENCODE_BASE_URL_TRUSTED:-false}" != "true" ]]; then
+            echo "::error title=OpenCode::Refusing to continue because OPENCODE_BASE_URL trust check failed."
+            exit 1
+          fi
+          echo "::notice title=OpenCode::base_url host '${OPENCODE_BASE_URL_HOST:-unknown}' approved (trust_mode='${OPENCODE_BASE_URL_TRUST_MODE:-unknown}')."
+
       - name: Run OpenCode
         uses: sst/opencode/github@v0
         env:
@@ -392,18 +543,20 @@ jobs:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY || secrets.AZURE_API_KEY || secrets.API_KEY || secrets.apiKey }}
           OPENCODE_BASE_URL: ${{ env.OPENCODE_BASE_URL }}
           OPENCODE_API_VERSION: ${{ env.OPENCODE_API_VERSION }}
+          OPENCODE_PROVIDER: ${{ env.OPENCODE_PROVIDER }}
+          OPENCODE_MODEL_ID: ${{ env.OPENCODE_MODEL_ID }}
           AZURE_OPENAI_API_KEY: ${{ secrets.OPENCODE_API_KEY || secrets.AZURE_API_KEY || secrets.API_KEY || secrets.apiKey }}
           AZURE_API_KEY: ${{ secrets.OPENCODE_API_KEY || secrets.AZURE_API_KEY || secrets.API_KEY || secrets.apiKey }}
           API_KEY: ${{ secrets.OPENCODE_API_KEY || secrets.AZURE_API_KEY || secrets.API_KEY || secrets.apiKey }}
           apiKey: ${{ secrets.OPENCODE_API_KEY || secrets.AZURE_API_KEY || secrets.API_KEY || secrets.apiKey }}
-          BASEURL: ${{ vars.OPENCODE_BASE_URL || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}
-          baseurl: ${{ vars.OPENCODE_BASE_URL || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}
-          MODEL_ID: ${{ vars.OPENCODE_MODEL_ID || vars.MODEL_ID || vars.modelid || vars.model || 'gpt-5.3-codex' }}
-          modelid: ${{ vars.OPENCODE_MODEL_ID || vars.MODEL_ID || vars.modelid || vars.model || 'gpt-5.3-codex' }}
-          model: ${{ vars.OPENCODE_MODEL_ID || vars.MODEL_ID || vars.modelid || vars.model || 'gpt-5.3-codex' }}
+          BASEURL: ${{ env.OPENCODE_BASE_URL }}
+          baseurl: ${{ env.OPENCODE_BASE_URL }}
+          MODEL_ID: ${{ env.OPENCODE_MODEL_ID }}
+          modelid: ${{ env.OPENCODE_MODEL_ID }}
+          model: ${{ env.OPENCODE_MODEL_ID }}
           OPENCODE_RUN_KIND: ${{ needs.detect-trigger.outputs.run_kind }}
         with:
-          model: ${{ needs.detect-trigger.outputs.model }}
+          model: ${{ steps.provider-env.outputs.model }}
           agent: ${{ needs.detect-trigger.outputs.agent != '' && needs.detect-trigger.outputs.agent || null }}
           variant: ${{ needs.detect-trigger.outputs.variant != '' && needs.detect-trigger.outputs.variant || null }}
           share: ${{ needs.detect-trigger.outputs.share != '' && needs.detect-trigger.outputs.share || null }}

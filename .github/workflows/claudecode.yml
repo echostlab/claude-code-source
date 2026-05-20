@@ -15,6 +15,22 @@ on:
         description: Prompt to run in CI
         required: false
         type: string
+      provider:
+        description: Provider alias (e.g. azure-foundry)
+        required: false
+        type: string
+      model_id:
+        description: Azure deployment/model id (e.g. gpt-4.1, deepseek-r1)
+        required: false
+        type: string
+      base_url:
+        description: Provider base URL (must be https)
+        required: false
+        type: string
+      api_version:
+        description: API version override (optional)
+        required: false
+        type: string
 
 concurrency:
   group: claudecode-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
@@ -30,6 +46,7 @@ jobs:
       pr_number: ${{ steps.detect.outputs.pr_number }}
       issue_number: ${{ steps.detect.outputs.issue_number }}
       has_pr_context: ${{ steps.detect.outputs.has_pr_context }}
+      provider: ${{ steps.detect.outputs.provider }}
     steps:
       - id: detect
         name: Detect event and build prompt
@@ -53,6 +70,8 @@ jobs:
           ALLOWED_ASSOCIATIONS: OWNER,MEMBER,COLLABORATOR
           ALLOWED_SLASH_ACTORS: ${{ vars.CLAUDECODE_ALLOWED_SLASH_ACTORS || vars.OPENCODE_ALLOWED_SLASH_ACTORS || '' }}
           WORKFLOW_PROMPT: ${{ inputs.prompt || '' }}
+          DISPATCH_PROVIDER: ${{ github.event.inputs.provider || '' }}
+          DEFAULT_PROVIDER: ${{ vars.CLAUDECODE_PROVIDER || vars.OPENCODE_PROVIDER || vars.PROVIDER || vars.provider || 'azure-foundry' }}
         run: |
           set -euo pipefail
 
@@ -60,6 +79,8 @@ jobs:
           RUN_KIND="none"
           PROMPT=""
           HAS_PR_CONTEXT="false"
+          RAW_PROVIDER=""
+          RESOLVED_PROVIDER=""
 
           trim() {
             local v="$1"
@@ -97,6 +118,21 @@ jobs:
               return 0
             fi
             return 1
+          }
+
+          normalize_provider() {
+            local input="${1:-}"
+            local normalized="${input,,}"
+
+            case "$normalized" in
+              azure|azure-foundry|azure-openai|foundry)
+                echo "azure-foundry"
+                ;;
+              *)
+                echo "::error title=ClaudeCode::Unsupported provider '$input'. Allowed values: azure, azure-foundry, azure-openai, foundry" >&2
+                exit 1
+                ;;
+            esac
           }
 
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
@@ -155,7 +191,21 @@ jobs:
             fi
           fi
 
-          echo "::notice title=ClaudeCode::Event '$EVENT_NAME' -> should_run=$SHOULD_RUN, run_kind=$RUN_KIND"
+          if [[ "$SHOULD_RUN" == "true" ]]; then
+            RAW_PROVIDER="$(trim "${DISPATCH_PROVIDER:-}")"
+            if [[ -z "$RAW_PROVIDER" ]]; then
+              RAW_PROVIDER="$(trim "${DEFAULT_PROVIDER:-azure-foundry}")"
+            fi
+            RESOLVED_PROVIDER="$(normalize_provider "$RAW_PROVIDER")"
+          else
+            RESOLVED_PROVIDER="azure-foundry"
+            RAW_PROVIDER="$(trim "${DISPATCH_PROVIDER:-}")"
+            if [[ -n "$RAW_PROVIDER" ]]; then
+              echo "::notice title=ClaudeCode::Skipping provider validation because should_run=false for event '$EVENT_NAME'"
+            fi
+          fi
+
+          echo "::notice title=ClaudeCode::Event '$EVENT_NAME' -> should_run=$SHOULD_RUN, run_kind=$RUN_KIND, provider='$RESOLVED_PROVIDER' (Azure Foundry mode)"
 
           OUTPUT_DELIM="CLAUDECODE_$(date +%s)_$RANDOM_$RANDOM"
           {
@@ -164,6 +214,7 @@ jobs:
             echo "pr_number=$PR_NUMBER"
             echo "issue_number=$ISSUE_NUMBER"
             echo "has_pr_context=$HAS_PR_CONTEXT"
+            echo "provider=$RESOLVED_PROVIDER"
             echo "prompt<<$OUTPUT_DELIM"
             echo "$PROMPT"
             echo "$OUTPUT_DELIM"
@@ -175,6 +226,8 @@ jobs:
             echo "- should_run: \`$SHOULD_RUN\`"
             echo "- run_kind: \`$RUN_KIND\`"
             echo "- mode: \`$([[ "$RUN_KIND" == "issue_task" ]] && echo implementation || echo review)\`"
+            echo "- provider: \`$RESOLVED_PROVIDER\`"
+            echo "- runtime: \`azure-foundry\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   claudecode-implement:
@@ -187,14 +240,30 @@ jobs:
       issues: write
 
     env:
-      baseurl: ${{ vars.CLAUDECODE_BASE_URL || vars.OPENCODE_BASE_URL || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}
-      BASEURL: ${{ vars.CLAUDECODE_BASE_URL || vars.OPENCODE_BASE_URL || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}
-      CLAUDECODE_BASE_URL: ${{ vars.CLAUDECODE_BASE_URL || vars.OPENCODE_BASE_URL || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}
-      modelid: ${{ vars.CLAUDECODE_MODEL_ID || vars.OPENCODE_MODEL_ID || vars.MODEL_ID || vars.modelid || vars.model || 'gpt-5.3-codex' }}
-      MODEL_ID: ${{ vars.CLAUDECODE_MODEL_ID || vars.OPENCODE_MODEL_ID || vars.MODEL_ID || vars.modelid || vars.model || 'gpt-5.3-codex' }}
-      model: ${{ vars.CLAUDECODE_MODEL_ID || vars.OPENCODE_MODEL_ID || vars.MODEL_ID || vars.modelid || vars.model || 'gpt-5.3-codex' }}
-      apiVersion: ${{ vars.CLAUDECODE_API_VERSION || vars.OPENCODE_API_VERSION || vars.API_VERSION || vars.APIVERSION || vars.apiVersion || '' }}
-      API_VERSION: ${{ vars.CLAUDECODE_API_VERSION || vars.OPENCODE_API_VERSION || vars.API_VERSION || vars.APIVERSION || vars.apiVersion || '' }}
+      DISPATCH_PROVIDER: ${{ github.event.inputs.provider || '' }}
+      DISPATCH_MODEL_ID: ${{ github.event.inputs.model_id || '' }}
+      DISPATCH_BASE_URL: ${{ github.event.inputs.base_url || '' }}
+      DISPATCH_API_VERSION: ${{ github.event.inputs.api_version || '' }}
+      DETECTED_PROVIDER: ${{ needs.detect-trigger.outputs.provider }}
+      CLAUDECODE_ALLOW_NON_AZURE_BASE_URL: ${{ vars.CLAUDECODE_ALLOW_NON_AZURE_BASE_URL || '' }}
+
+      provider: ${{ vars.CLAUDECODE_PROVIDER || vars.OPENCODE_PROVIDER || vars.PROVIDER || vars.provider || 'azure-foundry' }}
+      PROVIDER: ${{ vars.CLAUDECODE_PROVIDER || vars.OPENCODE_PROVIDER || vars.PROVIDER || vars.provider || 'azure-foundry' }}
+      CLAUDECODE_PROVIDER: ${{ vars.CLAUDECODE_PROVIDER || vars.OPENCODE_PROVIDER || vars.PROVIDER || vars.provider || 'azure-foundry' }}
+
+      baseurl: ${{ vars.CLAUDECODE_BASE_URL || vars.OPENCODE_BASE_URL || vars.AZURE_OPENAI_ENDPOINT || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}
+      BASEURL: ${{ vars.CLAUDECODE_BASE_URL || vars.OPENCODE_BASE_URL || vars.AZURE_OPENAI_ENDPOINT || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}
+      CLAUDECODE_BASE_URL: ${{ vars.CLAUDECODE_BASE_URL || vars.OPENCODE_BASE_URL || vars.AZURE_OPENAI_ENDPOINT || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}
+      AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT || '' }}
+
+      modelid: ${{ vars.CLAUDECODE_MODEL_ID || vars.OPENCODE_MODEL_ID || vars.AZURE_OPENAI_DEPLOYMENT || vars.MODEL_ID || vars.modelid || vars.model || 'gpt-5.3-codex' }}
+      MODEL_ID: ${{ vars.CLAUDECODE_MODEL_ID || vars.OPENCODE_MODEL_ID || vars.AZURE_OPENAI_DEPLOYMENT || vars.MODEL_ID || vars.modelid || vars.model || 'gpt-5.3-codex' }}
+      model: ${{ vars.CLAUDECODE_MODEL_ID || vars.OPENCODE_MODEL_ID || vars.AZURE_OPENAI_DEPLOYMENT || vars.MODEL_ID || vars.modelid || vars.model || 'gpt-5.3-codex' }}
+      AZURE_OPENAI_DEPLOYMENT: ${{ vars.AZURE_OPENAI_DEPLOYMENT || '' }}
+
+      apiVersion: ${{ vars.CLAUDECODE_API_VERSION || vars.OPENCODE_API_VERSION || vars.AZURE_OPENAI_API_VERSION || vars.API_VERSION || vars.APIVERSION || vars.apiVersion || '' }}
+      API_VERSION: ${{ vars.CLAUDECODE_API_VERSION || vars.OPENCODE_API_VERSION || vars.AZURE_OPENAI_API_VERSION || vars.API_VERSION || vars.APIVERSION || vars.apiVersion || '' }}
+      AZURE_OPENAI_API_VERSION: ${{ vars.AZURE_OPENAI_API_VERSION || '' }}
 
     steps:
       - name: Checkout repository
@@ -273,6 +342,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           first_non_empty() {
             local value=""
             for value in "$@"; do
@@ -284,17 +354,123 @@ jobs:
             return 1
           }
 
-          RESOLVED_BASEURL="$(first_non_empty "${CLAUDECODE_BASE_URL:-}" "${BASEURL:-}" "${baseurl:-}" "https://openslab-resource.openai.azure.com/openai/v1")"
-          RESOLVED_MODELID="$(first_non_empty "${MODEL_ID:-}" "${modelid:-}" "${model:-}" "gpt-5.3-codex")"
-          RESOLVED_APIVERSION="$(first_non_empty "${API_VERSION:-}" "${apiVersion:-}" "")"
+          trim() {
+            local value="${1:-}"
+            value="${value#"${value%%[![:space:]]*}"}"
+            value="${value%"${value##*[![:space:]]}"}"
+            printf '%s' "$value"
+          }
+
+          normalize_provider() {
+            local input="${1:-}"
+            local normalized="${input,,}"
+
+            case "$normalized" in
+              azure|azure-foundry|azure-openai|foundry)
+                echo "azure-foundry"
+                ;;
+              *)
+                echo "::error title=ClaudeCode::Unsupported provider '$input'. Allowed values: azure, azure-foundry, azure-openai, foundry" >&2
+                exit 1
+                ;;
+            esac
+          }
+
+          is_truthy() {
+            local value="${1:-}"
+            case "${value,,}" in
+              1|true|yes|y|on) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          is_allowed_azure_host() {
+            local host="${1,,}"
+            case "$host" in
+              openai.azure.com|*.openai.azure.com|services.ai.azure.com|*.services.ai.azure.com)
+                return 0
+                ;;
+              *)
+                return 1
+                ;;
+            esac
+          }
+
+          RAW_PROVIDER="$(first_non_empty "${DETECTED_PROVIDER:-}" "${DISPATCH_PROVIDER:-}" "${CLAUDECODE_PROVIDER:-}" "${PROVIDER:-}" "${provider:-}" "azure-foundry")"
+          RAW_PROVIDER="$(trim "$RAW_PROVIDER")"
+          RESOLVED_PROVIDER="$(normalize_provider "$RAW_PROVIDER")"
+
+          RESOLVED_BASEURL="$(first_non_empty "${DISPATCH_BASE_URL:-}" "${CLAUDECODE_BASE_URL:-}" "${AZURE_OPENAI_ENDPOINT:-}" "${BASEURL:-}" "${baseurl:-}" "https://openslab-resource.openai.azure.com/openai/v1")"
+          RESOLVED_BASEURL="$(trim "$RESOLVED_BASEURL")"
+
+          RAW_MODELID="$(first_non_empty "${DISPATCH_MODEL_ID:-}" "${CLAUDECODE_MODEL_ID:-}" "${AZURE_OPENAI_DEPLOYMENT:-}" "${MODEL_ID:-}" "${modelid:-}" "${model:-}" "gpt-5.3-codex")"
+          RAW_MODELID="$(trim "$RAW_MODELID")"
+
+          RESOLVED_APIVERSION="$(first_non_empty "${DISPATCH_API_VERSION:-}" "${CLAUDECODE_API_VERSION:-}" "${AZURE_OPENAI_API_VERSION:-}" "${API_VERSION:-}" "${apiVersion:-}" "")"
+          RESOLVED_APIVERSION="$(trim "$RESOLVED_APIVERSION")"
+
+          ALLOW_NON_AZURE_BASE_URL_RAW="$(trim "${CLAUDECODE_ALLOW_NON_AZURE_BASE_URL:-}")"
+
+          if [[ -z "${RAW_MODELID//[[:space:]]/}" ]]; then
+            echo "::error title=ClaudeCode::model_id cannot be empty after resolution"
+            exit 1
+          fi
+
+          if ! RESOLVED_BASEURL_HOST="$(node -e 'const value = process.argv[1]; if (!value || !value.trim()) { console.error("base_url is empty"); process.exit(1); } let parsed; try { parsed = new URL(value); } catch { console.error("base_url is not a valid URL"); process.exit(1); } if (parsed.protocol !== "https:") { console.error(`base_url must use https (received ${parsed.protocol || "unknown"})`); process.exit(1); } process.stdout.write(parsed.hostname.toLowerCase());' "$RESOLVED_BASEURL")"
+          then
+            echo "::error title=ClaudeCode::Invalid base_url '$RESOLVED_BASEURL'"
+            exit 1
+          fi
+
+          BASE_URL_TRUST_MODE="azure-allowlist"
+          if is_allowed_azure_host "$RESOLVED_BASEURL_HOST"; then
+            BASE_URL_TRUSTED="true"
+          elif is_truthy "$ALLOW_NON_AZURE_BASE_URL_RAW"; then
+            BASE_URL_TRUSTED="true"
+            BASE_URL_TRUST_MODE="override-non-azure"
+            echo "::warning title=ClaudeCode::Using non-Azure base_url host '$RESOLVED_BASEURL_HOST' because CLAUDECODE_ALLOW_NON_AZURE_BASE_URL=true. API key will be sent to this host."
+          else
+            echo "::error title=ClaudeCode::base_url host '$RESOLVED_BASEURL_HOST' is not allowed. Allowed hosts: *.openai.azure.com, *.services.ai.azure.com. Set CLAUDECODE_ALLOW_NON_AZURE_BASE_URL=true only for trusted non-Azure endpoints."
+            exit 1
+          fi
+
+          RESOLVED_MODELID="$RAW_MODELID"
+          if [[ "${RESOLVED_MODELID,,}" == azure-foundry/* ]]; then
+            RESOLVED_MODELID="${RESOLVED_MODELID#*/}"
+            echo "::notice title=ClaudeCode::Normalized model_id '$RAW_MODELID' -> '$RESOLVED_MODELID'"
+          fi
+
+          if [[ -z "${RESOLVED_MODELID//[[:space:]]/}" ]]; then
+            echo "::error title=ClaudeCode::model_id resolved to empty after normalization"
+            exit 1
+          fi
 
           {
+            echo "CLAUDECODE_FOUNDRY_PROVIDER=$RESOLVED_PROVIDER"
+            echo "CLAUDECODE_FOUNDRY_PROVIDER_INPUT=$RAW_PROVIDER"
             echo "CLAUDECODE_FOUNDRY_BASE_URL=$RESOLVED_BASEURL"
+            echo "CLAUDECODE_FOUNDRY_BASE_URL_HOST=$RESOLVED_BASEURL_HOST"
+            echo "CLAUDECODE_FOUNDRY_BASE_URL_TRUSTED=$BASE_URL_TRUSTED"
+            echo "CLAUDECODE_FOUNDRY_BASE_URL_TRUST_MODE=$BASE_URL_TRUST_MODE"
+            echo "CLAUDECODE_FOUNDRY_MODEL_ID_RAW=$RAW_MODELID"
             echo "CLAUDECODE_FOUNDRY_MODEL_ID=$RESOLVED_MODELID"
             echo "CLAUDECODE_FOUNDRY_API_VERSION=$RESOLVED_APIVERSION"
           } >> "$GITHUB_ENV"
 
-          echo "::notice title=ClaudeCode::Foundry env prepared (base_url=$RESOLVED_BASEURL, model=$RESOLVED_MODELID, api_version=${RESOLVED_APIVERSION:-default})"
+          echo "::notice title=ClaudeCode::Azure Foundry mode active (provider='$RESOLVED_PROVIDER', model='$RESOLVED_MODELID', base_url_host='$RESOLVED_BASEURL_HOST', trust_mode='$BASE_URL_TRUST_MODE', api_version='${RESOLVED_APIVERSION:-default}')"
+
+          {
+            echo "## Claude Code runtime config"
+            echo "- provider input: \`$RAW_PROVIDER\`"
+            echo "- provider normalized: \`$RESOLVED_PROVIDER\`"
+            echo "- runtime: \`azure-foundry\`"
+            echo "- model_id (resolved): \`$RAW_MODELID\`"
+            echo "- model_id (ANTHROPIC_MODEL): \`$RESOLVED_MODELID\`"
+            echo "- base_url: \`$RESOLVED_BASEURL\`"
+            echo "- base_url host: \`$RESOLVED_BASEURL_HOST\`"
+            echo "- base_url trust mode: \`$BASE_URL_TRUST_MODE\`"
+            echo "- api_version: \`${RESOLVED_APIVERSION:-default}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build effective prompt
         id: prompt
@@ -347,10 +523,95 @@ jobs:
             exit 1
           fi
 
+          trim() {
+            local value="${1:-}"
+            value="${value#"${value%%[![:space:]]*}"}"
+            value="${value%"${value##*[![:space:]]}"}"
+            printf '%s' "$value"
+          }
+
+          normalize_provider() {
+            local input="${1:-}"
+            local normalized="${input,,}"
+
+            case "$normalized" in
+              azure|azure-foundry|azure-openai|foundry)
+                echo "azure-foundry"
+                ;;
+              *)
+                echo "::error title=ClaudeCode::Unsupported provider '$input'. Allowed values: azure, azure-foundry, azure-openai, foundry" >&2
+                exit 1
+                ;;
+            esac
+          }
+
+          is_truthy() {
+            local value="${1:-}"
+            case "${value,,}" in
+              1|true|yes|y|on) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          is_allowed_azure_host() {
+            local host="${1,,}"
+            case "$host" in
+              openai.azure.com|*.openai.azure.com|services.ai.azure.com|*.services.ai.azure.com)
+                return 0
+                ;;
+              *)
+                return 1
+                ;;
+            esac
+          }
+
           RESOLVED_APIKEY="${API_KEY:-${apiKey:-}}"
+          RAW_PROVIDER="${CLAUDECODE_FOUNDRY_PROVIDER:-${DETECTED_PROVIDER:-${CLAUDECODE_PROVIDER:-${PROVIDER:-${provider:-azure-foundry}}}}}"
+          RAW_PROVIDER="$(trim "$RAW_PROVIDER")"
+          RESOLVED_PROVIDER="$(normalize_provider "$RAW_PROVIDER")"
           RESOLVED_BASEURL="${CLAUDECODE_FOUNDRY_BASE_URL:-${CLAUDECODE_BASE_URL:-${BASEURL:-${baseurl:-}}}}"
+          RESOLVED_BASEURL="$(trim "$RESOLVED_BASEURL")"
           RESOLVED_MODELID="${CLAUDECODE_FOUNDRY_MODEL_ID:-${MODEL_ID:-${modelid:-${model:-}}}}"
+          RESOLVED_MODELID="$(trim "$RESOLVED_MODELID")"
           RESOLVED_APIVERSION="${CLAUDECODE_FOUNDRY_API_VERSION:-${API_VERSION:-${apiVersion:-}}}"
+          RESOLVED_APIVERSION="$(trim "$RESOLVED_APIVERSION")"
+
+          if [[ "$RESOLVED_PROVIDER" != "azure-foundry" ]]; then
+            echo "::error title=ClaudeCode::Runtime only supports Azure Foundry. Resolved provider '$RESOLVED_PROVIDER' is not supported."
+            exit 1
+          fi
+
+          RESOLVED_BASEURL_HOST="${CLAUDECODE_FOUNDRY_BASE_URL_HOST:-}"
+          if [[ -z "$RESOLVED_BASEURL_HOST" ]]; then
+            if ! RESOLVED_BASEURL_HOST="$(node -e 'const value = process.argv[1]; if (!value || !value.trim()) { console.error("base_url is empty"); process.exit(1); } let parsed; try { parsed = new URL(value); } catch { console.error("base_url is not a valid URL"); process.exit(1); } if (parsed.protocol !== "https:") { console.error(`base_url must use https (received ${parsed.protocol || "unknown"})`); process.exit(1); } process.stdout.write(parsed.hostname.toLowerCase());' "$RESOLVED_BASEURL")"
+            then
+              echo "::error title=ClaudeCode::Invalid base_url '$RESOLVED_BASEURL'"
+              exit 1
+            fi
+          fi
+
+          ALLOW_NON_AZURE_BASE_URL_RAW="$(trim "${CLAUDECODE_ALLOW_NON_AZURE_BASE_URL:-}")"
+          BASE_URL_TRUSTED="false"
+          BASE_URL_TRUST_MODE="azure-allowlist"
+
+          if is_allowed_azure_host "$RESOLVED_BASEURL_HOST"; then
+            BASE_URL_TRUSTED="true"
+            BASE_URL_TRUST_MODE="azure-allowlist"
+          elif is_truthy "$ALLOW_NON_AZURE_BASE_URL_RAW"; then
+            BASE_URL_TRUSTED="true"
+            BASE_URL_TRUST_MODE="override-non-azure"
+            echo "::warning title=ClaudeCode::Allowing non-Azure base_url host '$RESOLVED_BASEURL_HOST' because CLAUDECODE_ALLOW_NON_AZURE_BASE_URL=true"
+          fi
+
+          if [[ "$BASE_URL_TRUSTED" != "true" ]]; then
+            echo "::error title=ClaudeCode::Refusing to export API key to untrusted base_url host '$RESOLVED_BASEURL_HOST'. Allowed hosts: *.openai.azure.com, *.services.ai.azure.com."
+            exit 1
+          fi
+
+          if [[ -z "${RESOLVED_MODELID//[[:space:]]/}" ]]; then
+            echo "::error title=ClaudeCode::ANTHROPIC_MODEL cannot be empty"
+            exit 1
+          fi
 
           export CLAUDE_CODE_USE_FOUNDRY=1
           export ANTHROPIC_FOUNDRY_BASE_URL="$RESOLVED_BASEURL"
@@ -360,7 +621,14 @@ jobs:
             export ANTHROPIC_FOUNDRY_API_VERSION="$RESOLVED_APIVERSION"
           fi
 
-          echo "::notice title=ClaudeCode::Running mode '$RUN_KIND'"
+          {
+            echo "CLAUDECODE_SELECTED_PROVIDER=$RESOLVED_PROVIDER"
+            echo "CLAUDECODE_SELECTED_MODEL=$RESOLVED_MODELID"
+            echo "CLAUDECODE_SELECTED_BASE_URL_HOST=$RESOLVED_BASEURL_HOST"
+            echo "CLAUDECODE_SELECTED_BASE_URL_TRUST_MODE=$BASE_URL_TRUST_MODE"
+          } >> "$GITHUB_ENV"
+
+          echo "::notice title=ClaudeCode::Running mode '$RUN_KIND' in Azure Foundry runtime (provider='$RESOLVED_PROVIDER', model='$RESOLVED_MODELID', base_url_host='$RESOLVED_BASEURL_HOST', trust_mode='$BASE_URL_TRUST_MODE')"
           node ./bin/claude-code-source --print --output-format text "$CLAUDE_PROMPT" | tee claudecode-output.txt
           echo "::endgroup::"
 
@@ -429,9 +697,27 @@ jobs:
           RUN_KIND: ${{ needs.detect-trigger.outputs.run_kind }}
         run: |
           set -euo pipefail
+
+          SELECTED_PROVIDER="${CLAUDECODE_SELECTED_PROVIDER:-${CLAUDECODE_FOUNDRY_PROVIDER:-unknown}}"
+          SELECTED_MODEL="${CLAUDECODE_SELECTED_MODEL:-${CLAUDECODE_FOUNDRY_MODEL_ID:-unknown}}"
+          SELECTED_BASE_URL="${CLAUDECODE_FOUNDRY_BASE_URL:-${CLAUDECODE_BASE_URL:-${BASEURL:-${baseurl:-unknown}}}}"
+          SELECTED_BASE_URL_HOST="${CLAUDECODE_SELECTED_BASE_URL_HOST:-${CLAUDECODE_FOUNDRY_BASE_URL_HOST:-unknown}}"
+          SELECTED_BASE_URL_TRUST_MODE="${CLAUDECODE_SELECTED_BASE_URL_TRUST_MODE:-${CLAUDECODE_FOUNDRY_BASE_URL_TRUST_MODE:-unknown}}"
+          SELECTED_API_VERSION="${CLAUDECODE_FOUNDRY_API_VERSION:-${API_VERSION:-${apiVersion:-}}}"
+          if [[ -z "$SELECTED_API_VERSION" ]]; then
+            SELECTED_API_VERSION="default"
+          fi
+
           {
             echo "## Claude Code run"
             echo "- run_kind: \`$RUN_KIND\`"
+            echo "- runtime: \`azure-foundry\`"
+            echo "- provider (normalized): \`$SELECTED_PROVIDER\`"
+            echo "- model: \`$SELECTED_MODEL\`"
+            echo "- base_url: \`$SELECTED_BASE_URL\`"
+            echo "- base_url host: \`$SELECTED_BASE_URL_HOST\`"
+            echo "- base_url trust mode: \`$SELECTED_BASE_URL_TRUST_MODE\`"
+            echo "- api_version: \`$SELECTED_API_VERSION\`"
             echo "- workflow: \`${{ github.workflow }}\`"
             echo "- run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             echo
@@ -453,14 +739,30 @@ jobs:
       issues: read
 
     env:
-      baseurl: ${{ vars.CLAUDECODE_BASE_URL || vars.OPENCODE_BASE_URL || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}
-      BASEURL: ${{ vars.CLAUDECODE_BASE_URL || vars.OPENCODE_BASE_URL || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}
-      CLAUDECODE_BASE_URL: ${{ vars.CLAUDECODE_BASE_URL || vars.OPENCODE_BASE_URL || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}
-      modelid: ${{ vars.CLAUDECODE_MODEL_ID || vars.OPENCODE_MODEL_ID || vars.MODEL_ID || vars.modelid || vars.model || 'gpt-5.3-codex' }}
-      MODEL_ID: ${{ vars.CLAUDECODE_MODEL_ID || vars.OPENCODE_MODEL_ID || vars.MODEL_ID || vars.modelid || vars.model || 'gpt-5.3-codex' }}
-      model: ${{ vars.CLAUDECODE_MODEL_ID || vars.OPENCODE_MODEL_ID || vars.MODEL_ID || vars.modelid || vars.model || 'gpt-5.3-codex' }}
-      apiVersion: ${{ vars.CLAUDECODE_API_VERSION || vars.OPENCODE_API_VERSION || vars.API_VERSION || vars.APIVERSION || vars.apiVersion || '' }}
-      API_VERSION: ${{ vars.CLAUDECODE_API_VERSION || vars.OPENCODE_API_VERSION || vars.API_VERSION || vars.APIVERSION || vars.apiVersion || '' }}
+      DISPATCH_PROVIDER: ${{ github.event.inputs.provider || '' }}
+      DISPATCH_MODEL_ID: ${{ github.event.inputs.model_id || '' }}
+      DISPATCH_BASE_URL: ${{ github.event.inputs.base_url || '' }}
+      DISPATCH_API_VERSION: ${{ github.event.inputs.api_version || '' }}
+      DETECTED_PROVIDER: ${{ needs.detect-trigger.outputs.provider }}
+      CLAUDECODE_ALLOW_NON_AZURE_BASE_URL: ${{ vars.CLAUDECODE_ALLOW_NON_AZURE_BASE_URL || '' }}
+
+      provider: ${{ vars.CLAUDECODE_PROVIDER || vars.OPENCODE_PROVIDER || vars.PROVIDER || vars.provider || 'azure-foundry' }}
+      PROVIDER: ${{ vars.CLAUDECODE_PROVIDER || vars.OPENCODE_PROVIDER || vars.PROVIDER || vars.provider || 'azure-foundry' }}
+      CLAUDECODE_PROVIDER: ${{ vars.CLAUDECODE_PROVIDER || vars.OPENCODE_PROVIDER || vars.PROVIDER || vars.provider || 'azure-foundry' }}
+
+      baseurl: ${{ vars.CLAUDECODE_BASE_URL || vars.OPENCODE_BASE_URL || vars.AZURE_OPENAI_ENDPOINT || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}
+      BASEURL: ${{ vars.CLAUDECODE_BASE_URL || vars.OPENCODE_BASE_URL || vars.AZURE_OPENAI_ENDPOINT || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}
+      CLAUDECODE_BASE_URL: ${{ vars.CLAUDECODE_BASE_URL || vars.OPENCODE_BASE_URL || vars.AZURE_OPENAI_ENDPOINT || vars.BASEURL || vars.baseurl || 'https://openslab-resource.openai.azure.com/openai/v1' }}
+      AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT || '' }}
+
+      modelid: ${{ vars.CLAUDECODE_MODEL_ID || vars.OPENCODE_MODEL_ID || vars.AZURE_OPENAI_DEPLOYMENT || vars.MODEL_ID || vars.modelid || vars.model || 'gpt-5.3-codex' }}
+      MODEL_ID: ${{ vars.CLAUDECODE_MODEL_ID || vars.OPENCODE_MODEL_ID || vars.AZURE_OPENAI_DEPLOYMENT || vars.MODEL_ID || vars.modelid || vars.model || 'gpt-5.3-codex' }}
+      model: ${{ vars.CLAUDECODE_MODEL_ID || vars.OPENCODE_MODEL_ID || vars.AZURE_OPENAI_DEPLOYMENT || vars.MODEL_ID || vars.modelid || vars.model || 'gpt-5.3-codex' }}
+      AZURE_OPENAI_DEPLOYMENT: ${{ vars.AZURE_OPENAI_DEPLOYMENT || '' }}
+
+      apiVersion: ${{ vars.CLAUDECODE_API_VERSION || vars.OPENCODE_API_VERSION || vars.AZURE_OPENAI_API_VERSION || vars.API_VERSION || vars.APIVERSION || vars.apiVersion || '' }}
+      API_VERSION: ${{ vars.CLAUDECODE_API_VERSION || vars.OPENCODE_API_VERSION || vars.AZURE_OPENAI_API_VERSION || vars.API_VERSION || vars.APIVERSION || vars.apiVersion || '' }}
+      AZURE_OPENAI_API_VERSION: ${{ vars.AZURE_OPENAI_API_VERSION || '' }}
 
     steps:
       - name: Checkout repository
@@ -495,6 +797,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           first_non_empty() {
             local value=""
             for value in "$@"; do
@@ -506,17 +809,123 @@ jobs:
             return 1
           }
 
-          RESOLVED_BASEURL="$(first_non_empty "${CLAUDECODE_BASE_URL:-}" "${BASEURL:-}" "${baseurl:-}" "https://openslab-resource.openai.azure.com/openai/v1")"
-          RESOLVED_MODELID="$(first_non_empty "${MODEL_ID:-}" "${modelid:-}" "${model:-}" "gpt-5.3-codex")"
-          RESOLVED_APIVERSION="$(first_non_empty "${API_VERSION:-}" "${apiVersion:-}" "")"
+          trim() {
+            local value="${1:-}"
+            value="${value#"${value%%[![:space:]]*}"}"
+            value="${value%"${value##*[![:space:]]}"}"
+            printf '%s' "$value"
+          }
+
+          normalize_provider() {
+            local input="${1:-}"
+            local normalized="${input,,}"
+
+            case "$normalized" in
+              azure|azure-foundry|azure-openai|foundry)
+                echo "azure-foundry"
+                ;;
+              *)
+                echo "::error title=ClaudeCode::Unsupported provider '$input'. Allowed values: azure, azure-foundry, azure-openai, foundry" >&2
+                exit 1
+                ;;
+            esac
+          }
+
+          is_truthy() {
+            local value="${1:-}"
+            case "${value,,}" in
+              1|true|yes|y|on) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          is_allowed_azure_host() {
+            local host="${1,,}"
+            case "$host" in
+              openai.azure.com|*.openai.azure.com|services.ai.azure.com|*.services.ai.azure.com)
+                return 0
+                ;;
+              *)
+                return 1
+                ;;
+            esac
+          }
+
+          RAW_PROVIDER="$(first_non_empty "${DETECTED_PROVIDER:-}" "${DISPATCH_PROVIDER:-}" "${CLAUDECODE_PROVIDER:-}" "${PROVIDER:-}" "${provider:-}" "azure-foundry")"
+          RAW_PROVIDER="$(trim "$RAW_PROVIDER")"
+          RESOLVED_PROVIDER="$(normalize_provider "$RAW_PROVIDER")"
+
+          RESOLVED_BASEURL="$(first_non_empty "${DISPATCH_BASE_URL:-}" "${CLAUDECODE_BASE_URL:-}" "${AZURE_OPENAI_ENDPOINT:-}" "${BASEURL:-}" "${baseurl:-}" "https://openslab-resource.openai.azure.com/openai/v1")"
+          RESOLVED_BASEURL="$(trim "$RESOLVED_BASEURL")"
+
+          RAW_MODELID="$(first_non_empty "${DISPATCH_MODEL_ID:-}" "${CLAUDECODE_MODEL_ID:-}" "${AZURE_OPENAI_DEPLOYMENT:-}" "${MODEL_ID:-}" "${modelid:-}" "${model:-}" "gpt-5.3-codex")"
+          RAW_MODELID="$(trim "$RAW_MODELID")"
+
+          RESOLVED_APIVERSION="$(first_non_empty "${DISPATCH_API_VERSION:-}" "${CLAUDECODE_API_VERSION:-}" "${AZURE_OPENAI_API_VERSION:-}" "${API_VERSION:-}" "${apiVersion:-}" "")"
+          RESOLVED_APIVERSION="$(trim "$RESOLVED_APIVERSION")"
+
+          ALLOW_NON_AZURE_BASE_URL_RAW="$(trim "${CLAUDECODE_ALLOW_NON_AZURE_BASE_URL:-}")"
+
+          if [[ -z "${RAW_MODELID//[[:space:]]/}" ]]; then
+            echo "::error title=ClaudeCode::model_id cannot be empty after resolution"
+            exit 1
+          fi
+
+          if ! RESOLVED_BASEURL_HOST="$(node -e 'const value = process.argv[1]; if (!value || !value.trim()) { console.error("base_url is empty"); process.exit(1); } let parsed; try { parsed = new URL(value); } catch { console.error("base_url is not a valid URL"); process.exit(1); } if (parsed.protocol !== "https:") { console.error(`base_url must use https (received ${parsed.protocol || "unknown"})`); process.exit(1); } process.stdout.write(parsed.hostname.toLowerCase());' "$RESOLVED_BASEURL")"
+          then
+            echo "::error title=ClaudeCode::Invalid base_url '$RESOLVED_BASEURL'"
+            exit 1
+          fi
+
+          BASE_URL_TRUST_MODE="azure-allowlist"
+          if is_allowed_azure_host "$RESOLVED_BASEURL_HOST"; then
+            BASE_URL_TRUSTED="true"
+          elif is_truthy "$ALLOW_NON_AZURE_BASE_URL_RAW"; then
+            BASE_URL_TRUSTED="true"
+            BASE_URL_TRUST_MODE="override-non-azure"
+            echo "::warning title=ClaudeCode::Using non-Azure base_url host '$RESOLVED_BASEURL_HOST' because CLAUDECODE_ALLOW_NON_AZURE_BASE_URL=true. API key will be sent to this host."
+          else
+            echo "::error title=ClaudeCode::base_url host '$RESOLVED_BASEURL_HOST' is not allowed. Allowed hosts: *.openai.azure.com, *.services.ai.azure.com. Set CLAUDECODE_ALLOW_NON_AZURE_BASE_URL=true only for trusted non-Azure endpoints."
+            exit 1
+          fi
+
+          RESOLVED_MODELID="$RAW_MODELID"
+          if [[ "${RESOLVED_MODELID,,}" == azure-foundry/* ]]; then
+            RESOLVED_MODELID="${RESOLVED_MODELID#*/}"
+            echo "::notice title=ClaudeCode::Normalized model_id '$RAW_MODELID' -> '$RESOLVED_MODELID'"
+          fi
+
+          if [[ -z "${RESOLVED_MODELID//[[:space:]]/}" ]]; then
+            echo "::error title=ClaudeCode::model_id resolved to empty after normalization"
+            exit 1
+          fi
 
           {
+            echo "CLAUDECODE_FOUNDRY_PROVIDER=$RESOLVED_PROVIDER"
+            echo "CLAUDECODE_FOUNDRY_PROVIDER_INPUT=$RAW_PROVIDER"
             echo "CLAUDECODE_FOUNDRY_BASE_URL=$RESOLVED_BASEURL"
+            echo "CLAUDECODE_FOUNDRY_BASE_URL_HOST=$RESOLVED_BASEURL_HOST"
+            echo "CLAUDECODE_FOUNDRY_BASE_URL_TRUSTED=$BASE_URL_TRUSTED"
+            echo "CLAUDECODE_FOUNDRY_BASE_URL_TRUST_MODE=$BASE_URL_TRUST_MODE"
+            echo "CLAUDECODE_FOUNDRY_MODEL_ID_RAW=$RAW_MODELID"
             echo "CLAUDECODE_FOUNDRY_MODEL_ID=$RESOLVED_MODELID"
             echo "CLAUDECODE_FOUNDRY_API_VERSION=$RESOLVED_APIVERSION"
           } >> "$GITHUB_ENV"
 
-          echo "::notice title=ClaudeCode::Foundry env prepared (base_url=$RESOLVED_BASEURL, model=$RESOLVED_MODELID, api_version=${RESOLVED_APIVERSION:-default})"
+          echo "::notice title=ClaudeCode::Azure Foundry mode active (provider='$RESOLVED_PROVIDER', model='$RESOLVED_MODELID', base_url_host='$RESOLVED_BASEURL_HOST', trust_mode='$BASE_URL_TRUST_MODE', api_version='${RESOLVED_APIVERSION:-default}')"
+
+          {
+            echo "## Claude Code runtime config"
+            echo "- provider input: \`$RAW_PROVIDER\`"
+            echo "- provider normalized: \`$RESOLVED_PROVIDER\`"
+            echo "- runtime: \`azure-foundry\`"
+            echo "- model_id (resolved): \`$RAW_MODELID\`"
+            echo "- model_id (ANTHROPIC_MODEL): \`$RESOLVED_MODELID\`"
+            echo "- base_url: \`$RESOLVED_BASEURL\`"
+            echo "- base_url host: \`$RESOLVED_BASEURL_HOST\`"
+            echo "- base_url trust mode: \`$BASE_URL_TRUST_MODE\`"
+            echo "- api_version: \`${RESOLVED_APIVERSION:-default}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build effective prompt
         id: prompt
@@ -559,10 +968,95 @@ jobs:
             exit 1
           fi
 
+          trim() {
+            local value="${1:-}"
+            value="${value#"${value%%[![:space:]]*}"}"
+            value="${value%"${value##*[![:space:]]}"}"
+            printf '%s' "$value"
+          }
+
+          normalize_provider() {
+            local input="${1:-}"
+            local normalized="${input,,}"
+
+            case "$normalized" in
+              azure|azure-foundry|azure-openai|foundry)
+                echo "azure-foundry"
+                ;;
+              *)
+                echo "::error title=ClaudeCode::Unsupported provider '$input'. Allowed values: azure, azure-foundry, azure-openai, foundry" >&2
+                exit 1
+                ;;
+            esac
+          }
+
+          is_truthy() {
+            local value="${1:-}"
+            case "${value,,}" in
+              1|true|yes|y|on) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          is_allowed_azure_host() {
+            local host="${1,,}"
+            case "$host" in
+              openai.azure.com|*.openai.azure.com|services.ai.azure.com|*.services.ai.azure.com)
+                return 0
+                ;;
+              *)
+                return 1
+                ;;
+            esac
+          }
+
           RESOLVED_APIKEY="${API_KEY:-${apiKey:-}}"
+          RAW_PROVIDER="${CLAUDECODE_FOUNDRY_PROVIDER:-${DETECTED_PROVIDER:-${CLAUDECODE_PROVIDER:-${PROVIDER:-${provider:-azure-foundry}}}}}"
+          RAW_PROVIDER="$(trim "$RAW_PROVIDER")"
+          RESOLVED_PROVIDER="$(normalize_provider "$RAW_PROVIDER")"
           RESOLVED_BASEURL="${CLAUDECODE_FOUNDRY_BASE_URL:-${CLAUDECODE_BASE_URL:-${BASEURL:-${baseurl:-}}}}"
+          RESOLVED_BASEURL="$(trim "$RESOLVED_BASEURL")"
           RESOLVED_MODELID="${CLAUDECODE_FOUNDRY_MODEL_ID:-${MODEL_ID:-${modelid:-${model:-}}}}"
+          RESOLVED_MODELID="$(trim "$RESOLVED_MODELID")"
           RESOLVED_APIVERSION="${CLAUDECODE_FOUNDRY_API_VERSION:-${API_VERSION:-${apiVersion:-}}}"
+          RESOLVED_APIVERSION="$(trim "$RESOLVED_APIVERSION")"
+
+          if [[ "$RESOLVED_PROVIDER" != "azure-foundry" ]]; then
+            echo "::error title=ClaudeCode::Runtime only supports Azure Foundry. Resolved provider '$RESOLVED_PROVIDER' is not supported."
+            exit 1
+          fi
+
+          RESOLVED_BASEURL_HOST="${CLAUDECODE_FOUNDRY_BASE_URL_HOST:-}"
+          if [[ -z "$RESOLVED_BASEURL_HOST" ]]; then
+            if ! RESOLVED_BASEURL_HOST="$(node -e 'const value = process.argv[1]; if (!value || !value.trim()) { console.error("base_url is empty"); process.exit(1); } let parsed; try { parsed = new URL(value); } catch { console.error("base_url is not a valid URL"); process.exit(1); } if (parsed.protocol !== "https:") { console.error(`base_url must use https (received ${parsed.protocol || "unknown"})`); process.exit(1); } process.stdout.write(parsed.hostname.toLowerCase());' "$RESOLVED_BASEURL")"
+            then
+              echo "::error title=ClaudeCode::Invalid base_url '$RESOLVED_BASEURL'"
+              exit 1
+            fi
+          fi
+
+          ALLOW_NON_AZURE_BASE_URL_RAW="$(trim "${CLAUDECODE_ALLOW_NON_AZURE_BASE_URL:-}")"
+          BASE_URL_TRUSTED="false"
+          BASE_URL_TRUST_MODE="azure-allowlist"
+
+          if is_allowed_azure_host "$RESOLVED_BASEURL_HOST"; then
+            BASE_URL_TRUSTED="true"
+            BASE_URL_TRUST_MODE="azure-allowlist"
+          elif is_truthy "$ALLOW_NON_AZURE_BASE_URL_RAW"; then
+            BASE_URL_TRUSTED="true"
+            BASE_URL_TRUST_MODE="override-non-azure"
+            echo "::warning title=ClaudeCode::Allowing non-Azure base_url host '$RESOLVED_BASEURL_HOST' because CLAUDECODE_ALLOW_NON_AZURE_BASE_URL=true"
+          fi
+
+          if [[ "$BASE_URL_TRUSTED" != "true" ]]; then
+            echo "::error title=ClaudeCode::Refusing to export API key to untrusted base_url host '$RESOLVED_BASEURL_HOST'. Allowed hosts: *.openai.azure.com, *.services.ai.azure.com."
+            exit 1
+          fi
+
+          if [[ -z "${RESOLVED_MODELID//[[:space:]]/}" ]]; then
+            echo "::error title=ClaudeCode::ANTHROPIC_MODEL cannot be empty"
+            exit 1
+          fi
 
           export CLAUDE_CODE_USE_FOUNDRY=1
           export ANTHROPIC_FOUNDRY_BASE_URL="$RESOLVED_BASEURL"
@@ -572,7 +1066,14 @@ jobs:
             export ANTHROPIC_FOUNDRY_API_VERSION="$RESOLVED_APIVERSION"
           fi
 
-          echo "::notice title=ClaudeCode::Running mode '$RUN_KIND'"
+          {
+            echo "CLAUDECODE_SELECTED_PROVIDER=$RESOLVED_PROVIDER"
+            echo "CLAUDECODE_SELECTED_MODEL=$RESOLVED_MODELID"
+            echo "CLAUDECODE_SELECTED_BASE_URL_HOST=$RESOLVED_BASEURL_HOST"
+            echo "CLAUDECODE_SELECTED_BASE_URL_TRUST_MODE=$BASE_URL_TRUST_MODE"
+          } >> "$GITHUB_ENV"
+
+          echo "::notice title=ClaudeCode::Running mode '$RUN_KIND' in Azure Foundry runtime (provider='$RESOLVED_PROVIDER', model='$RESOLVED_MODELID', base_url_host='$RESOLVED_BASEURL_HOST', trust_mode='$BASE_URL_TRUST_MODE')"
           node ./bin/claude-code-source --print --output-format text "$CLAUDE_PROMPT" | tee claudecode-output.txt
           echo "::endgroup::"
 
@@ -583,9 +1084,27 @@ jobs:
           RUN_KIND: ${{ needs.detect-trigger.outputs.run_kind }}
         run: |
           set -euo pipefail
+
+          SELECTED_PROVIDER="${CLAUDECODE_SELECTED_PROVIDER:-${CLAUDECODE_FOUNDRY_PROVIDER:-unknown}}"
+          SELECTED_MODEL="${CLAUDECODE_SELECTED_MODEL:-${CLAUDECODE_FOUNDRY_MODEL_ID:-unknown}}"
+          SELECTED_BASE_URL="${CLAUDECODE_FOUNDRY_BASE_URL:-${CLAUDECODE_BASE_URL:-${BASEURL:-${baseurl:-unknown}}}}"
+          SELECTED_BASE_URL_HOST="${CLAUDECODE_SELECTED_BASE_URL_HOST:-${CLAUDECODE_FOUNDRY_BASE_URL_HOST:-unknown}}"
+          SELECTED_BASE_URL_TRUST_MODE="${CLAUDECODE_SELECTED_BASE_URL_TRUST_MODE:-${CLAUDECODE_FOUNDRY_BASE_URL_TRUST_MODE:-unknown}}"
+          SELECTED_API_VERSION="${CLAUDECODE_FOUNDRY_API_VERSION:-${API_VERSION:-${apiVersion:-}}}"
+          if [[ -z "$SELECTED_API_VERSION" ]]; then
+            SELECTED_API_VERSION="default"
+          fi
+
           {
             echo "## Claude Code run"
             echo "- run_kind: \`$RUN_KIND\`"
+            echo "- runtime: \`azure-foundry\`"
+            echo "- provider (normalized): \`$SELECTED_PROVIDER\`"
+            echo "- model: \`$SELECTED_MODEL\`"
+            echo "- base_url: \`$SELECTED_BASE_URL\`"
+            echo "- base_url host: \`$SELECTED_BASE_URL_HOST\`"
+            echo "- base_url trust mode: \`$SELECTED_BASE_URL_TRUST_MODE\`"
+            echo "- api_version: \`$SELECTED_API_VERSION\`"
             echo "- workflow: \`${{ github.workflow }}\`"
             echo "- run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             echo
