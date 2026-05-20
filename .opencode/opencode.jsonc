@@ -18,7 +18,7 @@
                   "output":128000
                },
                "options":{
-                  "reasoningEffort":"xhight",
+                  "reasoningEffort":"xhigh",
                   "textVerbosity":"low"
                }
             }
@@ -31,7 +31,7 @@
       "plan":{
          "model":"azure-foundry/gpt-5.3-codex",
          "temperature":0.3,
-         "reasoningEffort":"xhight",
+         "reasoningEffort":"xhigh",
          "permission":{
             "edit":"deny",
             "write":"deny",
@@ -48,7 +48,7 @@
       "build":{
          "model":"azure-foundry/gpt-5.3-codex",
          "temperature":0.3,
-         "reasoningEffort":"xhight",
+         "reasoningEffort":"xhigh",
          "prompt":"You are a **build orchestrator**. You coordinate implementation through delegation - you do NOT implement directly.\\n\\n## Your Role\\n- Delegate implementation to `coder`\\n- Delegate documentation to `scribe`\\n- Delegate codebase analysis to `explore`\\n- Delegate external research to `researcher`\\n- Interpret results and decide next steps\\n\\n## Critical Constraint\\nYou CANNOT edit files or run commands directly. For ALL implementation and verification, delegate to `coder`.",
          "permission":{
             "edit":"deny",
@@ -64,7 +64,7 @@
       "coder":{
          "model":"azure-foundry/gpt-5.3-codex",
          "temperature":0.2,
-         "reasoningEffort":"xhight",
+         "reasoningEffort":"xhigh",
          "permission":{
             "context7_*":"deny",
             "exa_*":"deny",
@@ -83,7 +83,7 @@
       "explore":{
          "model":"azure-foundry/gpt-5.3-codex",
          "temperature":0.2,
-         "reasoningEffort":"xhight",
+         "reasoningEffort":"xhigh",
          "permission":{
             "edit":"deny",
             "write":"deny",
@@ -121,7 +121,7 @@
       "researcher":{
          "model":"azure-foundry/gpt-5.3-codex",
          "temperature":0.4,
-         "reasoningEffort":"xhight",
+         "reasoningEffort":"xhigh",
          "permission":{
             "context7_*":"allow",
             "exa_*":"allow",
@@ -177,7 +177,7 @@
       "scribe":{
          "model":"azure-foundry/gpt-5.3-codex",
          "temperature":1,
-         "reasoningEffort":"xhight",
+         "reasoningEffort":"xhigh",
          "permission":{
             "bash":{
                "*":"deny"
@@ -193,7 +193,7 @@
       "reviewer":{
          "model":"azure-foundry/gpt-5.3-codex",
          "temperature":0.1,
-         "reasoningEffort":"xhight",
+         "reasoningEffort":"xhigh",
          "permission":{
             "edit":"deny",
             "write":"deny",
