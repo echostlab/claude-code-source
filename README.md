@@ -31,3 +31,22 @@ Este fork depende de **Bun** para:
 Guía paso a paso:
 
 - [Guía de compilación y empaquetado npm](./docs/guia-empaquetado-npm.md)
+
+## CI rápido (workflow `claudecode`)
+
+Variables mínimas recomendadas para GitHub Actions:
+
+- **Secret API key** (cualquiera de estos aliases):
+  - `CLAUDECODE_API_KEY` (preferido)
+  - `OPENCODE_API_KEY`, `AZURE_OPENAI_API_KEY`, `AZURE_API_KEY`, `API_KEY`, `apiKey`
+- **Repo variable model id** (opcional, default `gpt-5.3-codex`):
+  - `CLAUDECODE_MODEL_ID` (preferido)
+  - `OPENCODE_MODEL_ID`, `MODEL_ID`, `modelid`, `model`
+- **Repo variable base URL** (opcional, default Azure Foundry del workflow):
+  - `CLAUDECODE_BASE_URL` (preferido)
+  - `OPENCODE_BASE_URL`, `BASEURL`, `baseurl`
+- **Repo variable API version** (opcional):
+  - `CLAUDECODE_API_VERSION` (preferido)
+  - `OPENCODE_API_VERSION`, `API_VERSION`, `APIVERSION`, `apiVersion`
+
+El workflow usa `GITHUB_TOKEN` con permisos explícitos mínimos para crear rama/commit/PR y comentar en issues.
