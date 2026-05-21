@@ -18,6 +18,30 @@ Ejecutar:
 claude-code-source
 ```
 
+## Instalar localmente sin publicar en npm
+
+Genera el tarball local:
+
+```sh
+npm pack
+```
+
+Esto crea un archivo como `claude-code-source-<version>.tgz`.
+
+Instalación local (proyecto actual):
+
+```sh
+npm install ./claude-code-source-<version>.tgz
+```
+
+Instalación global sin `sudo` (recomendada):
+
+```sh
+npm config set prefix ~/.local
+export PATH="$HOME/.local/bin:$PATH"
+npm install -g ./claude-code-source-<version>.tgz
+```
+
 ## Nota importante sobre runtime/build
 
 Este fork depende de **Bun** para:
