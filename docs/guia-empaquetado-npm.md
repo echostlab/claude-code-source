@@ -70,7 +70,29 @@ npm pack
 
 El script `prepack` ejecuta automáticamente `npm run build` antes de empaquetar (y por tanto exige Bun).
 
-## 6) Publicar en npm
+## 6) Instalar el tarball localmente (sin publicar)
+
+Instalación local en el proyecto actual:
+
+```bash
+npm install ./claude-code-source-<version>.tgz
+```
+
+Instalación global sin `sudo` (recomendada):
+
+```bash
+npm config set prefix ~/.local
+export PATH="$HOME/.local/bin:$PATH"
+npm install -g ./claude-code-source-<version>.tgz
+```
+
+Verificar:
+
+```bash
+claude-code-source --version
+```
+
+## 7) Publicar en npm
 
 ```bash
 npm login
