@@ -30,6 +30,36 @@ if (feature('ABLATION_BASELINE') && process.env.CLAUDE_CODE_ABLATION_BASELINE) {
  * All imports are dynamic to minimize module evaluation for fast paths.
  * Fast-path for --version has zero imports beyond this file.
  */
+function getExecutableName(): string {
+  const raw = process.argv[1]
+  if (!raw) {
+    return 'claude-code-source'
+  }
+
+  const segments = raw.split(/[\\/]/)
+  const executableName = segments.at(-1)
+
+  if (!executableName || executableName === 'cli.js') {
+    return 'claude-code-source'
+  }
+
+  return executableName
+}
+
+function printBootstrapHelp(): void {
+  const executableName = getExecutableName()
+  // biome-ignore lint/suspicious/noConsole:: intentional console output
+  console.log(`Usage: ${executableName} [options] [command]
+
+Claude Code CLI
+
+Options:
+  -v, --version  Output the version number
+  -h, --help     Display help for command
+
+Run \`${executableName}\` without arguments to start the interactive session.`)
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
@@ -38,6 +68,12 @@ async function main(): Promise<void> {
     // MACRO.VERSION is inlined at build time
     // biome-ignore lint/suspicious/noConsole:: intentional console output
     console.log(`${MACRO.VERSION} (Claude Code)`);
+    return;
+  }
+
+  // Fast-path for --help/-h: avoid loading the full CLI graph.
+  if (args.length === 1 && (args[0] === '--help' || args[0] === '-h')) {
+    printBootstrapHelp();
     return;
   }
 

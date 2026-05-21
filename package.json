@@ -30,9 +30,8 @@
   },
   "files": [
     "dist/",
-    "src/",
     "bin/",
-    "scripts/",
+    "scripts/require-bun.cjs",
     "docs/guia-empaquetado-npm.md",
     "README.md",
     "LICENSE.md"
@@ -48,12 +47,27 @@
     "prepack": "npm run build",
     "pack:dry": "npm pack --dry-run"
   },
-  "dependencies": {},
-  "devDependencies": {
+  "dependencies": {
+    "@anthropic-ai/sdk": "0.97.1",
+    "@commander-js/extra-typings": "14.0.0",
+    "@growthbook/growthbook": "1.6.5",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "axios": "1.16.1",
+    "chalk": "5.6.2",
+    "chokidar": "5.0.0",
     "unique-names-generator": "4.7.1",
-    "zod": "4.3.5",
+    "emoji-regex": "10.6.0",
+    "execa": "9.6.1",
+    "get-east-asian-width": "1.6.0",
+    "ignore": "7.0.5",
+    "jsonc-parser": "3.3.1",
+    "lodash-es": "4.18.1",
     "node-notifier": "10.0.1",
+    "p-map": "7.0.4",
+    "react": "19.2.6",
+    "strip-ansi": "7.2.0",
     "detect-terminal": "2.0.0",
-    "jsonc-parser": "3.3.1"
-  }
+    "zod": "4.3.5"
+  },
+  "devDependencies": {}
 }

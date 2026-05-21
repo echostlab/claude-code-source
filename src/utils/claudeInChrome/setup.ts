@@ -1,4 +1,3 @@
-import { BROWSER_TOOLS } from '@ant/claude-for-chrome-mcp'
 import { chmod, mkdir, readFile, writeFile } from 'fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
@@ -35,6 +34,24 @@ const CHROME_EXTENSION_RECONNECT_URL = 'https://clau.de/chrome/reconnect'
 
 const NATIVE_HOST_IDENTIFIER = 'com.anthropic.claude_code_browser_extension'
 const NATIVE_HOST_MANIFEST_NAME = `${NATIVE_HOST_IDENTIFIER}.json`
+
+type BrowserTool = {
+  name: string
+}
+
+export function getClaudeInChromeBrowserTools(): BrowserTool[] {
+  try {
+    /* eslint-disable @typescript-eslint/no-require-imports */
+    const module = require('@ant/claude-for-chrome-mcp') as {
+      BROWSER_TOOLS?: BrowserTool[]
+    }
+    /* eslint-enable @typescript-eslint/no-require-imports */
+
+    return Array.isArray(module.BROWSER_TOOLS) ? module.BROWSER_TOOLS : []
+  } catch {
+    return []
+  }
+}
 
 export function shouldEnableClaudeInChrome(chromeFlag?: boolean): boolean {
   // Disable by default in non-interactive sessions (e.g., SDK, CI)
@@ -94,7 +111,7 @@ export function setupClaudeInChrome(): {
   systemPrompt: string
 } {
   const isNativeBuild = isInBundledMode()
-  const allowedTools = BROWSER_TOOLS.map(
+  const allowedTools = getClaudeInChromeBrowserTools().map(
     tool => `mcp__claude-in-chrome__${tool.name}`,
   )
 
